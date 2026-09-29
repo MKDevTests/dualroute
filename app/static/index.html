@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08111f">
+  <title>DualRoute</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div id="toast" class="toast" aria-live="polite"></div>
+  <aside class="sidebar">
+    <div class="brand"><span>Dual</span><strong>Route</strong><small>NAS • Réseau • Applications</small></div>
+    <nav id="nav">
+      <button data-page="dashboard" class="active"><i>⌂</i>Tableau de bord</button>
+      <button data-page="apps"><i>▦</i>Applications</button>
+      <button data-page="rules"><i>♢</i>Règles</button>
+      <button data-page="traffic"><i>▥</i>Trafic</button>
+      <button data-page="network"><i>⌘</i>Réseau</button>
+      <button data-page="events"><i>≡</i>Événements</button>
+      <button data-page="settings"><i>⚙</i>Paramètres</button>
+    </nav>
+    <div class="sidebar-status">
+      <b>DualRoute</b><span id="side-version">v0.1.0</span>
+      <small id="side-count">Découverte en cours…</small>
+    </div>
+  </aside>
+
+  <main>
+    <header>
+      <div><h1 id="page-title">Tableau de bord</h1><p id="page-subtitle">Vue d’ensemble du réseau, des applications et du trafic</p></div>
+      <div class="system-health"><span class="health-dot"></span><div><b>Système opérationnel</b><small id="last-update">Connexion…</small></div></div>
+    </header>
+    <section id="content" class="content" aria-live="polite"></section>
+  </main>
+
+  <dialog id="rule-dialog" class="drawer">
+    <form id="rule-form" method="dialog">
+      <div class="drawer-head"><div><h2 id="rule-title">Nouvelle règle</h2><p>Paramètres de routage et de priorité</p></div><button type="button" class="icon-button" data-close>×</button></div>
+      <input type="hidden" name="id">
+      <label>Application ou service<select name="app_id" required></select></label>
+      <div class="form-grid">
+        <label>Sens<select name="direction"><option value="both">Les deux</option><option value="out">Sortant</option><option value="in">Entrant</option></select></label>
+        <label>Stratégie<select name="strategy"><option value="prefer">Préférence avec bascule</option><option value="force">Forcer l’interface</option><option value="balance">Équilibrage de charge</option><option value="qos">Priorité QoS</option></select></label>
+        <label>Interface principale<select name="primary_interface"></select></label>
+        <label>Interface de repli<select name="fallback_interface"></select></label>
+        <label>Limite descendante (Mb/s)<input name="download_limit_mbps" type="number" min="1" placeholder="Illimitée"></label>
+        <label>Limite montante (Mb/s)<input name="upload_limit_mbps" type="number" min="1" placeholder="Illimitée"></label>
+      </div>
+      <label>Priorité QoS <input name="qos" type="range" min="1" max="5" value="3"><span class="range-labels"><small>1 — faible</small><small>5 — élevée</small></span></label>
+      <label>Ports entrants <input name="ports" placeholder="6881, 51413"></label>
+      <label class="toggle-row"><span><b>Règle active</b><small>Inclure cette règle lors de la prochaine application</small></span><input name="enabled" type="checkbox" checked></label>
+      <div class="route-preview" id="route-preview">ETH0 → ETH1 en cas de panne</div>
+      <div class="drawer-actions"><button type="button" class="secondary" data-close>Annuler</button><button type="submit" class="primary">Enregistrer la règle</button></div>
+    </form>
+  </dialog>
+
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

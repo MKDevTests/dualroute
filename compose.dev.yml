@@ -1,0 +1,25 @@
+name: dualroute-dev
+
+services:
+  dualroute:
+    build: .
+    image: dualroute:local
+    container_name: dualroute-dev
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DUALROUTE_PORT: "9080"
+      DUALROUTE_DATA_DIR: /var/lib/dualroute
+      DUALROUTE_DOCKER_SOCKET: /var/run/docker.sock
+      TZ: Europe/Paris
+    volumes:
+      - dualroute-dev-data:/var/lib/dualroute
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+volumes:
+  dualroute-dev-data:
