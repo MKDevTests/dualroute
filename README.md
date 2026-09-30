@@ -16,7 +16,7 @@ DualRoute est une interface web auto-hébergée pour administrer deux sorties Et
 - prévisualisation complète des commandes avant activation ;
 - surveillance des passerelles et bascule automatique toutes les quinze secondes en mode actif.
 
-Les limites de débit configurées sont affichées dans les règles et conservées, mais ne créent pas encore de classes `tc` locales. Les priorités QoS sont appliquées par marquage DSCP. Le routeur ou le fournisseur d'accès doit respecter ces marques pour qu'elles influencent la file WAN.
+Les limites de débit configurées sont affichées dans les règles et conservées, mais ne créent pas encore de classes `tc` locales. Les priorités QoS vont de `1` (minimale) à `5` (maximale) et sont appliquées par marquage DSCP. Le routeur ou le fournisseur d'accès doit respecter ces marques pour qu'elles influencent la file WAN.
 
 ## Topologie recommandée
 

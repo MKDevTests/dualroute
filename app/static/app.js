@@ -31,9 +31,10 @@ const strategyDescriptions = {
   force: "Tout le trafic de cette application sort par l’interface choisie. Il n’y a pas de bascule automatique.",
   prefer: "L’interface principale est utilisée normalement. DualRoute passe sur l’interface de repli si la passerelle principale ne répond plus.",
   balance: "Chaque nouvelle connexion est envoyée sur ETH0 ou ETH1. Une même connexion reste sur la même interface.",
-  qos: "Le trafic utilise l’interface principale et reçoit une marque de priorité DSCP comprise entre 1 et 5.",
+  qos: "Le trafic utilise l’interface principale et reçoit une marque DSCP : 1 est la priorité minimale, 5 la priorité maximale.",
 };
 const directionLabels = { in: "Entrant", out: "Sortant", both: "Les deux" };
+const qosLabels = { 1: "minimale", 2: "basse", 3: "normale", 4: "élevée", 5: "maximale" };
 
 function managedInterfaces() {
   return appState.snapshot.interfaces.filter(item => item.managed !== false);
@@ -204,7 +205,7 @@ function renderRules() {
     <td>${esc(directionLabels[rule.direction])}</td><td><span class="badge blue">${esc(strategyLabels[rule.strategy])}</span></td>
     <td>${interfaceBadge(rule.primary_interface)}</td><td>${rule.fallback_interface ? interfaceBadge(rule.fallback_interface) : "—"}</td>
     <td>${rule.download_limit_mbps ? `↓ ${rule.download_limit_mbps}` : "↓ ∞"} / ${rule.upload_limit_mbps ? `↑ ${rule.upload_limit_mbps}` : "↑ ∞"} Mb/s</td>
-    <td>${rule.qos}/5</td><td><span class="badge ${rule.enabled ? "green" : "amber"}"><span class="status-dot"></span>${rule.enabled ? "Activée" : "Suspendue"}</span></td>
+    <td><span title="1 = priorité minimale, 5 = priorité maximale">${rule.qos}/5 — ${qosLabels[rule.qos] || "normale"}</span></td><td><span class="badge ${rule.enabled ? "green" : "amber"}"><span class="status-dot"></span>${rule.enabled ? "Activée" : "Suspendue"}</span></td>
     <td><div class="row-actions"><button data-edit-rule="${rule.id}">Modifier</button><button data-delete-rule="${rule.id}">Supprimer</button></div></td>
   </tr>`).join("");
   $("#content").innerHTML = `<div class="toolbar"><div><h2>Une règle par application</h2><p>Choisissez précisément comment chaque application utilise ETH0 et ETH1.</p></div><div class="toolbar-actions"><button class="secondary" id="preview-rules">Prévisualiser</button><button class="primary" id="new-rule">＋ Nouvelle règle</button></div></div>
@@ -212,7 +213,7 @@ function renderRules() {
       <button class="capability-card" data-new-strategy="force"><b>① Forcer une interface</b><span>Utiliser uniquement ETH0 ou uniquement ETH1.</span></button>
       <button class="capability-card" data-new-strategy="prefer"><b>② Préférer + basculer</b><span>Utiliser une interface, puis l’autre si elle tombe.</span></button>
       <button class="capability-card" data-new-strategy="balance"><b>③ Répartir le trafic</b><span>Distribuer les nouvelles connexions entre les deux sorties.</span></button>
-      <button class="capability-card" data-new-strategy="qos"><b>④ Limiter ou prioriser</b><span>Définir les limites montante/descendante et la priorité QoS.</span></button>
+      <button class="capability-card" data-new-strategy="qos"><b>④ Limiter ou prioriser</b><span>Définir les limites et la priorité QoS : 1 minimale, 5 maximale.</span></button>
     </div>
     <section class="panel"><div class="table-scroll tall"><table class="data-table"><thead><tr><th style="width:45px">#</th><th style="width:18%">Application ou service</th><th>Sens</th><th style="width:17%">Mode</th><th>Interface principale</th><th>Repli</th><th>Limites ↓ / ↑</th><th>QoS</th><th>État</th><th style="width:150px">Actions</th></tr></thead><tbody>${rows || tableEmpty(10, "Aucune règle. Choisissez l’un des quatre modes ci-dessus pour commencer.")}</tbody></table></div><div class="table-footer"><span>${rules.length} règles</span><span>Les modifications sont appliquées uniquement sur demande.</span></div></section>`;
   $("#new-rule").onclick = () => openRuleDialog();
