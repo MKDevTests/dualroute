@@ -69,7 +69,7 @@ http.server.HTTPServer(("0.0.0.0",8000),Handler).serve_forever()
     docker("run", "-d", "--name", names[2], "--cap-add", "NET_ADMIN", "--health-cmd", "curl -fsS http://127.0.0.1:8000/v1/vpn/status", "--health-interval", "1s", "--health-start-period", "1s",
            "-e", 'HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE={"auth":"none"}', "--entrypoint", "python", "dualroute-smoke/gluetun:local", "-u", "-c", mock_server)
     docker("run", "-d", "--name", names[0], "--network", "host", "--cap-add", "SYS_PTRACE", "--cap-add", "SYS_ADMIN", "--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW",
-           "--security-opt", "no-new-privileges:true", "-v", "/proc:/host/proc:ro", "-v", "/var/run/docker.sock:/var/run/docker.sock:ro",
+           "--security-opt", "no-new-privileges:true", "-v", "/proc:/host/proc:ro", "-v", "/proc/sys/net:/host/sys/net:rw", "-v", "/var/run/docker.sock:/var/run/docker.sock:ro",
            "-e", "DUALROUTE_PORT=19080", "dualroute:test")
     eventually(lambda: api("/api/health")["version"] == "0.4.0", timeout=30)
     eventually(lambda: api("/api/traffic/flows").get("accounting_enabled"))
@@ -98,6 +98,11 @@ while True:
     assert any(item.get("local_only") and item.get("process") for item in api("/api/traffic/flows?limit=2000")["items"]), "Host socket/process attribution failed"
     print("Linux smoke passed: fast HTTP, Gluetun health, tunnel rates, shared-namespace application and host process attribution")
 except Exception:
+    try:
+        print("Flow diagnosis:", {key:value for key,value in api("/api/traffic/flows").items() if key != "items"})
+        print("Snapshot diagnosis:", api("/api/snapshot"))
+    except Exception:
+        pass
     for name in names:
         subprocess.run(["docker", "logs", "--tail", "50", name], check=False)
     raise

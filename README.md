@@ -95,6 +95,7 @@ Le fichier Compose utilise :
 - les capacités `NET_ADMIN` et `NET_RAW` pour `ip`, `nftables` et les tests de passerelle ;
 - `SYS_PTRACE` et `/proc:/host/proc:ro` pour relier les sockets aux processus hôtes et conteneurs ;
 - `SYS_ADMIN` pour rejoindre uniquement les espaces réseau VPN avec `nsenter` et lire leurs compteurs/connexions. Cette capacité est large : le conteneur doit être considéré comme un outil d’administration du NAS ;
+- `/proc/sys/net:/host/sys/net:rw` pour activer `nf_conntrack_acct` dans chaque espace réseau malgré le montage `/proc/sys` protégé par Docker. L’application écrit uniquement ce réglage ;
 - `/var/run/docker.sock` en lecture seule pour découvrir les applications ;
 - un volume `dualroute-data` pour la base SQLite.
 

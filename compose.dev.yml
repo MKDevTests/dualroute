@@ -25,6 +25,7 @@ services:
       - dualroute-dev-data:/var/lib/dualroute
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /proc:/host/proc:ro
+      - /proc/sys/net:/host/sys/net:rw
 
 volumes:
   dualroute-dev-data:

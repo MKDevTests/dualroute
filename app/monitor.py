@@ -44,6 +44,7 @@ class Monitor:
         self.rates = RateTracker()
         self.vpn_monitor = VPNMonitor(store)
         self._accounted = set()
+        self.accounting_errors = {}
         self._sockets = None
         self._sockets_at = 0
 
@@ -80,9 +81,19 @@ class Monitor:
         prefix = ["nsenter", f"--net={proc_root() / str(identity) / 'ns/net'}", "--"] if identity else []
         check = subprocess.run(prefix + ["sysctl", "-n", "net.netfilter.nf_conntrack_acct"], capture_output=True, text=True, timeout=3)
         if check.returncode == 0 and check.stdout.strip() != "1":
-            check = subprocess.run(prefix + ["sysctl", "-w", "net.netfilter.nf_conntrack_acct=1"], capture_output=True, text=True, timeout=3)
+            # Docker protects /proc/sys with a readonly mount. The explicit writable
+            # network-sysctl bind is resolved after setns, so each net namespace has its own setting.
+            check = subprocess.run(prefix + ["python", "-c", "from pathlib import Path; Path('/host/sys/net/netfilter/nf_conntrack_acct').write_text('1')"], capture_output=True, text=True, timeout=3)
+            if check.returncode == 0:
+                check = subprocess.run(prefix + ["sysctl", "-n", "net.netfilter.nf_conntrack_acct"], capture_output=True, text=True, timeout=3)
+                if check.stdout.strip() != "1":
+                    check.returncode = 1
+                    check.stderr = "Le compteur de cet espace réseau n’a pas été activé"
         if check.returncode == 0:
             self._accounted.add(identity)
+            self.accounting_errors.pop(identity, None)
+        else:
+            self.accounting_errors[identity] = check.stderr.strip().splitlines()[-1] if check.stderr.strip() else "Activation refusée"
 
     def collect_flows(self):
         if time.monotonic() - self.flow_requested_at > 30:
@@ -96,6 +107,7 @@ class Monitor:
         except (OSError, subprocess.SubprocessError):
             pass
         result = discover_flows(apps, 10000, interfaces, self._sockets)
+        result["accounting_message"] = self.accounting_errors.get(0)
         items = result["items"]
         if not result["available"]:
             # Keep last values and timestamp so a permission/read error is visible as stale data.
@@ -113,6 +125,7 @@ class Monitor:
             except (OSError, subprocess.SubprocessError):
                 pass
             inner = discover_flows(apps, 10000, [], self._sockets, app["pid"])
+            inner["accounting_message"] = self.accounting_errors.get(app["pid"])
             vpn_status[app["id"]] = {key: value for key, value in inner.items() if key != "items"}
             for item in inner["items"]:
                 item.update(id=f"{app['id']}:{item['id']}", scope="vpn", vpn_id=app["id"], interface=None,
