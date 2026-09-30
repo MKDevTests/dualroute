@@ -131,10 +131,9 @@ def discover_apps() -> list[dict[str, Any]]:
                 labels = attrs.get("Config", {}).get("Labels") or {}
                 display = (
                     labels.get("com.docker.compose.service")
-                    or labels.get("org.opencontainers.image.title")
                     or container.name
                 )
-                if display in {"app", "web", "server"}:
+                if is_vpn or display in {"app", "web", "server"}:
                     display = container.name
                 env = dict(item.split("=", 1) for item in attrs.get("Config", {}).get("Env", []) if "=" in item) if is_vpn else {}
                 try:

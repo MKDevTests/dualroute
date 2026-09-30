@@ -77,6 +77,9 @@ class SocketIndex:
                     for fd in (entry / "fd").iterdir():
                         try:
                             link = os.readlink(fd)
+                        except PermissionError:
+                            self.permission_errors += 1
+                            continue
                         except OSError:
                             continue
                         if not link.startswith("socket:["):

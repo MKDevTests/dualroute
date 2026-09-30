@@ -1,5 +1,6 @@
 """Linux integration: real host sockets, shared Docker namespace and VPN counters."""
 import json
+import os
 import socket
 import subprocess
 import threading
@@ -60,6 +61,7 @@ try:
     mock_server = '''import http.server,json,subprocess
 subprocess.run(["ip","link","add","wg0","type","dummy"],check=True)
 subprocess.run(["ip","link","set","wg0","up"],check=True)
+subprocess.run(["nft","-f","-"],input="table inet smoke { chain output { type filter hook output priority 0; policy accept; ct state new,established counter; } chain input { type filter hook input priority 0; policy accept; ct state new,established counter; } }",text=True,check=True)
 class Handler(http.server.BaseHTTPRequestHandler):
  def do_GET(self):
   self.send_response(200);self.end_headers()
@@ -95,11 +97,12 @@ while True:
     observed = next(item for item in snapshot["vpns"] if item["id"] == vpn["id"])
     assert any(app["name"] == names[1] for app in observed["apps"]), observed
     assert observed["metric"]["rx_bps"] is not None, observed
-    assert any(item.get("local_only") and item.get("process") for item in api("/api/traffic/flows?limit=2000")["items"]), "Host socket/process attribution failed"
+    assert any(item.get("local_only") and item.get("pid") == os.getpid() and (item["local_endpoint"].endswith(":"+str(port)) or item["remote_endpoint"].endswith(":"+str(port))) for item in api("/api/traffic/flows?limit=2000")["items"]), "Host socket/process attribution failed"
     print("Linux smoke passed: fast HTTP, Gluetun health, tunnel rates, shared-namespace application and host process attribution")
 except Exception:
     try:
         print("Flow diagnosis:", {key:value for key,value in api("/api/traffic/flows").items() if key != "items"})
+        print("Test socket flows:", [item for item in api("/api/traffic/flows?limit=2000")["items"] if item["local_endpoint"].endswith(":"+str(port)) or item["remote_endpoint"].endswith(":"+str(port))])
         print("Snapshot diagnosis:", api("/api/snapshot"))
     except Exception:
         pass
