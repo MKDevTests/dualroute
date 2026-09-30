@@ -57,7 +57,7 @@ def discover_interfaces() -> list[dict[str, Any]]:
     interfaces: list[dict[str, Any]] = []
 
     for name, addresses in psutil.net_if_addrs().items():
-        if not is_managed_interface(name):
+        if name.lower() == "lo":
             continue
         ipv4 = next((addr for addr in addresses if addr.family == socket.AF_INET), None)
         link = linux_links.get(name, {})
@@ -77,6 +77,8 @@ def discover_interfaces() -> list[dict[str, Any]]:
         interfaces.append(
             {
                 "name": name,
+                "managed": is_managed_interface(name),
+                "kind": (link.get("linkinfo") or {}).get("info_kind") or "physical",
                 "address": ipv4.address if ipv4 else None,
                 "prefix": prefix,
                 "network": str(ipaddress.ip_interface(f"{ipv4.address}/{prefix}").network) if ipv4 and prefix else None,
@@ -91,7 +93,7 @@ def discover_interfaces() -> list[dict[str, Any]]:
                 "tx_bytes": io.bytes_sent if io else 0,
             }
         )
-    interfaces.sort(key=lambda item: interface_order(item["name"]))
+    interfaces.sort(key=lambda item: (not item["managed"], interface_order(item["name"]), item["name"].lower()))
     return interfaces
 
 

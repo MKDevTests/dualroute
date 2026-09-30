@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 import psutil
 
 from .db import Store
-from .discovery import is_managed_interface
 
 
 class MetricsCollector:
@@ -24,7 +23,7 @@ class MetricsCollector:
             timestamp = now.timestamp()
             rows = []
             for name, counter in psutil.net_io_counters(pernic=True).items():
-                if not is_managed_interface(name):
+                if name.lower() == "lo":
                     continue
                 previous = self._previous.get(name)
                 rx_bps = tx_bps = 0.0

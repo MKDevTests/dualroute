@@ -78,10 +78,16 @@ class Store:
                 );
                 """
             )
-        if self.get_setting("enforcement_enabled") is None:
-            self.set_setting("enforcement_enabled", False)
-            self.set_setting("sample_interval_seconds", 2)
-            self.set_setting("retention_days", 30)
+        defaults = {
+            "enforcement_enabled": False,
+            "sample_interval_seconds": 2,
+            "retention_days": 30,
+            "display_rate_unit": "mbps",
+            "dashboard_managed_only": True,
+        }
+        for key, value in defaults.items():
+            if self.get_setting(key) is None:
+                self.set_setting(key, value)
 
     @staticmethod
     def _rule(row: sqlite3.Row) -> dict[str, Any]:

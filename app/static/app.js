@@ -24,10 +24,26 @@ const pageMeta = {
 const strategyLabels = {
   force: "Forcer l’interface",
   prefer: "Préférence avec bascule",
-  balance: "Équilibrage",
+  balance: "Répartition ETH0 / ETH1",
   qos: "Priorité QoS",
 };
+const strategyDescriptions = {
+  force: "Tout le trafic de cette application sort par l’interface choisie. Il n’y a pas de bascule automatique.",
+  prefer: "L’interface principale est utilisée normalement. DualRoute passe sur l’interface de repli si la passerelle principale ne répond plus.",
+  balance: "Chaque nouvelle connexion est envoyée sur ETH0 ou ETH1. Une même connexion reste sur la même interface.",
+  qos: "Le trafic utilise l’interface principale et reçoit une marque de priorité DSCP comprise entre 1 et 5.",
+};
 const directionLabels = { in: "Entrant", out: "Sortant", both: "Les deux" };
+
+function managedInterfaces() {
+  return appState.snapshot.interfaces.filter(item => item.managed !== false);
+}
+
+function dashboardInterfaces() {
+  return appState.snapshot.settings.dashboard_managed_only === false
+    ? appState.snapshot.interfaces
+    : managedInterfaces();
+}
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
@@ -35,10 +51,10 @@ function esc(value) {
 
 function formatRate(value) {
   const bps = Number(value || 0);
-  if (bps >= 1e9) return `${(bps / 1e9).toFixed(2)} Gb/s`;
-  if (bps >= 1e6) return `${(bps / 1e6).toFixed(1)} Mb/s`;
-  if (bps >= 1e3) return `${(bps / 1e3).toFixed(1)} kb/s`;
-  return `${Math.round(bps)} b/s`;
+  const useBytes = appState.snapshot.settings.display_rate_unit === "MBps";
+  const amount = useBytes ? bps / 8e6 : bps / 1e6;
+  const digits = amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
+  return `${amount.toFixed(digits)} ${useBytes ? "Mo/s" : "Mb/s"}`;
 }
 
 function formatBytes(value) {
@@ -97,7 +113,9 @@ async function refreshSnapshot(forceRender = false) {
     const nextSnapshot = await api(`/api/snapshot?include_app_stats=${includeAppStats}`);
     if (!includeAppStats) nextSnapshot.app_stats = previousStats;
     appState.snapshot = nextSnapshot;
-    $("#side-count").textContent = `${appState.snapshot.apps.length} applications • ${appState.snapshot.interfaces.length} interfaces`;
+    const managedCount = managedInterfaces().length;
+    const otherCount = appState.snapshot.interfaces.length - managedCount;
+    $("#side-count").textContent = `${appState.snapshot.apps.length} applications • ${managedCount} gérées${otherCount ? ` • ${otherCount} autres` : ""}`;
     $("#last-update").textContent = `Actualisé à ${new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
     if (forceRender || !$("#rule-dialog").open) renderPage();
   } catch (error) {
@@ -118,6 +136,7 @@ function interfaceCard(item, index) {
     <div class="card-head">
       <span class="nic-icon">↔</span><h3>${esc(item.name.toUpperCase())}</h3>
       <span class="badge ${item.up ? "green" : "red"}"><span class="status-dot"></span>${item.up ? "Opérationnel" : "Hors ligne"}</span>
+      ${item.managed === false ? `<span class="badge amber">Observation seule</span>` : ""}
       <div class="card-address"><small>Adresse IP</small><b>${esc(item.address || "Non configurée")}${item.prefix ? `/${item.prefix}` : ""}</b></div>
     </div>
     <div class="card-stats">
@@ -130,8 +149,9 @@ function interfaceCard(item, index) {
 }
 
 function renderDashboard() {
-  const { interfaces, apps, rules, warnings } = appState.snapshot;
-  const cards = interfaces.slice(0, 3).map(interfaceCard).join("");
+  const { apps, rules, warnings } = appState.snapshot;
+  const interfaces = dashboardInterfaces();
+  const cards = interfaces.map(interfaceCard).join("");
   const rows = apps.map(app => {
     const rule = rules.find(item => item.app_id === app.id);
     return `<tr>
@@ -146,7 +166,7 @@ function renderDashboard() {
   $("#content").innerHTML = `
     ${warnings.length ? `<div class="recommendation warning"><h3>Configuration à compléter</h3><p>${warnings.map(esc).join(" ")}</p></div>` : ""}
     <div class="cards">${cards || `<div class="recommendation warning"><h3>Aucune interface détectée</h3><p>La découverte réseau nécessite le conteneur en mode réseau hôte.</p></div>`}</div>
-    <section class="panel"><div class="panel-head"><div><h2>Trafic en temps réel</h2><p>Débits descendants et montants par interface</p></div><div class="legend">${interfaces.slice(0,3).map((item, index) => `<span style="--legend:${interfaceColor(index)}">${esc(item.name)}</span>`).join("")}</div></div><div class="chart-wrap"><canvas id="traffic-chart"></canvas></div></section>
+    <section class="panel"><div class="panel-head"><div><h2>Trafic en temps réel</h2><p>Débits descendants et montants par interface • ${appState.snapshot.settings.display_rate_unit === "MBps" ? "Mo/s" : "Mb/s"}</p></div><div class="legend">${interfaces.map((item, index) => `<span style="--legend:${interfaceColor(index)}">${esc(item.name)}</span>`).join("")}</div></div><div class="chart-wrap"><canvas id="traffic-chart"></canvas></div></section>
     <section class="panel"><div class="panel-head"><div><h2>Applications</h2><p>Activité et règle actuellement associée</p></div><button class="secondary" data-page-link="rules">Gérer les règles</button></div>
       <div class="table-scroll"><table class="data-table"><thead><tr><th style="width:24%">Application</th><th style="width:24%">Mode</th><th>Interface</th><th>Reçu</th><th>Envoyé</th><th>Statut</th></tr></thead><tbody>${rows || tableEmpty(6, "Aucune application détectée")}</tbody></table></div>
       <div class="table-footer"><span>${apps.length} applications détectées</span><span>Actualisation toutes les ${appState.snapshot.settings.sample_interval_seconds || 2} s</span></div>
@@ -165,13 +185,16 @@ function renderApps() {
       <td>${esc(app.image)}</td><td>${esc(app.ips.join(", ") || "Hôte")}</td><td>${esc(app.networks.join(", "))}</td>
       <td>${rule ? interfaceBadge(rule.primary_interface) : `<span class="muted">Aucune</span>`}</td>
       <td><span class="badge green"><span class="status-dot"></span>${esc(app.status)}</span></td>
-      <td><div class="row-actions"><button data-rule-app="${esc(app.id)}">Créer une règle</button></div></td>
+      <td><div class="row-actions"><button data-rule-app="${esc(app.id)}">${rule ? "Modifier la règle" : "Créer une règle"}</button></div></td>
     </tr>`;
   }).join("");
   $("#content").innerHTML = `<div class="toolbar"><div><h2>Applications découvertes</h2><p>Les adresses Docker sont actualisées automatiquement après chaque redémarrage de conteneur.</p></div><button class="secondary" id="refresh-apps">↻ Actualiser</button></div>
     <section class="panel"><div class="table-scroll tall"><table class="data-table"><thead><tr><th style="width:18%">Application</th><th>Type</th><th style="width:20%">Image</th><th>Adresses IP</th><th>Réseaux</th><th>Règle</th><th>Statut</th><th>Actions</th></tr></thead><tbody>${rows || tableEmpty(8, "Aucun conteneur Docker détecté")}</tbody></table></div><div class="table-footer"><span>${apps.length} services</span><span>Socket Docker monté en lecture seule</span></div></section>`;
   $("#refresh-apps").onclick = () => refreshSnapshot(true);
-  $$('[data-rule-app]').forEach(button => button.onclick = () => openRuleDialog(null, button.dataset.ruleApp));
+  $$('[data-rule-app]').forEach(button => button.onclick = () => {
+    const rule = rules.find(item => item.app_id === button.dataset.ruleApp);
+    openRuleDialog(rule?.id || null, button.dataset.ruleApp);
+  });
 }
 
 function renderRules() {
@@ -180,19 +203,27 @@ function renderRules() {
     <td>${index + 1}</td><td><div class="app-cell"><span class="app-icon">${rule.app_id === "service:smb" ? "▣" : "◇"}</span>${esc(rule.app_name)}</div></td>
     <td>${esc(directionLabels[rule.direction])}</td><td><span class="badge blue">${esc(strategyLabels[rule.strategy])}</span></td>
     <td>${interfaceBadge(rule.primary_interface)}</td><td>${rule.fallback_interface ? interfaceBadge(rule.fallback_interface) : "—"}</td>
+    <td>${rule.download_limit_mbps ? `↓ ${rule.download_limit_mbps}` : "↓ ∞"} / ${rule.upload_limit_mbps ? `↑ ${rule.upload_limit_mbps}` : "↑ ∞"} Mb/s</td>
     <td>${rule.qos}/5</td><td><span class="badge ${rule.enabled ? "green" : "amber"}"><span class="status-dot"></span>${rule.enabled ? "Activée" : "Suspendue"}</span></td>
     <td><div class="row-actions"><button data-edit-rule="${rule.id}">Modifier</button><button data-delete-rule="${rule.id}">Supprimer</button></div></td>
   </tr>`).join("");
-  $("#content").innerHTML = `<div class="toolbar"><div><h2>Règles de routage</h2><p>Ordre, stratégie, bascule et priorité de chaque service.</p></div><div class="toolbar-actions"><button class="secondary" id="preview-rules">Prévisualiser</button><button class="primary" id="new-rule">＋ Nouvelle règle</button></div></div>
-    <section class="panel"><div class="table-scroll tall"><table class="data-table"><thead><tr><th style="width:45px">#</th><th style="width:20%">Application ou service</th><th>Sens</th><th style="width:18%">Stratégie</th><th>Interface principale</th><th>Repli</th><th>QoS</th><th>État</th><th style="width:150px">Actions</th></tr></thead><tbody>${rows || tableEmpty(9, "Aucune règle. Créez la première règle pour une application.")}</tbody></table></div><div class="table-footer"><span>${rules.length} règles</span><span>Les modifications sont appliquées uniquement sur demande.</span></div></section>`;
+  $("#content").innerHTML = `<div class="toolbar"><div><h2>Une règle par application</h2><p>Choisissez précisément comment chaque application utilise ETH0 et ETH1.</p></div><div class="toolbar-actions"><button class="secondary" id="preview-rules">Prévisualiser</button><button class="primary" id="new-rule">＋ Nouvelle règle</button></div></div>
+    <div class="capability-grid">
+      <button class="capability-card" data-new-strategy="force"><b>① Forcer une interface</b><span>Utiliser uniquement ETH0 ou uniquement ETH1.</span></button>
+      <button class="capability-card" data-new-strategy="prefer"><b>② Préférer + basculer</b><span>Utiliser une interface, puis l’autre si elle tombe.</span></button>
+      <button class="capability-card" data-new-strategy="balance"><b>③ Répartir le trafic</b><span>Distribuer les nouvelles connexions entre les deux sorties.</span></button>
+      <button class="capability-card" data-new-strategy="qos"><b>④ Limiter ou prioriser</b><span>Définir les limites montante/descendante et la priorité QoS.</span></button>
+    </div>
+    <section class="panel"><div class="table-scroll tall"><table class="data-table"><thead><tr><th style="width:45px">#</th><th style="width:18%">Application ou service</th><th>Sens</th><th style="width:17%">Mode</th><th>Interface principale</th><th>Repli</th><th>Limites ↓ / ↑</th><th>QoS</th><th>État</th><th style="width:150px">Actions</th></tr></thead><tbody>${rows || tableEmpty(10, "Aucune règle. Choisissez l’un des quatre modes ci-dessus pour commencer.")}</tbody></table></div><div class="table-footer"><span>${rules.length} règles</span><span>Les modifications sont appliquées uniquement sur demande.</span></div></section>`;
   $("#new-rule").onclick = () => openRuleDialog();
   $("#preview-rules").onclick = previewRouting;
+  $$('[data-new-strategy]').forEach(button => button.onclick = () => openRuleDialog(null, null, button.dataset.newStrategy));
   $$('[data-edit-rule]').forEach(button => button.onclick = () => openRuleDialog(Number(button.dataset.editRule)));
   $$('[data-delete-rule]').forEach(button => button.onclick = () => removeRule(Number(button.dataset.deleteRule)));
 }
 
 function renderTraffic() {
-  const interfaces = appState.snapshot.interfaces.slice(0, 3);
+  const interfaces = managedInterfaces();
   const totalRx = interfaces.reduce((sum, item) => sum + Number((appState.snapshot.metrics[item.name] || {}).rx_bps || 0), 0);
   const totalTx = interfaces.reduce((sum, item) => sum + Number((appState.snapshot.metrics[item.name] || {}).tx_bps || 0), 0);
   const recent = appState.history.slice(-120).reverse();
@@ -214,17 +245,30 @@ function renderTraffic() {
 
 function renderNetwork() {
   const interfaces = appState.snapshot.interfaces;
-  const physical = interfaces.filter(item => ["eth0", "eth1"].includes(item.name.toLowerCase()));
+  const managed = managedInterfaces();
+  const detectedOnly = interfaces.filter(item => item.managed === false);
+  const physical = managed.filter(item => ["eth0", "eth1"].includes(item.name.toLowerCase()));
   const configured = physical.find(item => item.name.toLowerCase() === "eth1") || {};
-  const configuredNetworks = physical.filter(item => item.network && item.address).map(item => item.network);
-  const hasNetworkConflict = configuredNetworks.length >= 2 && new Set(configuredNetworks).size < configuredNetworks.length;
+  const addressedNetworks = physical.filter(item => item.network && item.address).map(item => item.network);
+  const configuredNetworks = physical.filter(item => item.up && item.network && item.address && item.gateway).map(item => item.network);
+  const hasNetworkConflict = addressedNetworks.length >= 2 && new Set(addressedNetworks).size < addressedNetworks.length;
   const proposedAddress = hasNetworkConflict ? "192.168.2.131" : (configured.address || "192.168.2.131");
   const proposedGateway = hasNetworkConflict ? "192.168.2.1" : (configured.gateway || "192.168.2.1");
-  const cards = interfaces.map((item, index) => `<article class="network-card" style="--accent:${interfaceColor(index)}"><div class="network-card-head"><span class="nic-icon">↔</span><h3>${esc(item.name.toUpperCase())}</h3><span class="badge ${item.up ? "green" : "red"}">${item.up ? "Connectée" : "Hors ligne"}</span></div><div class="network-details"><div class="detail"><small>Adresse IP</small><b>${esc(item.address || "Non configurée")}${item.prefix ? `/${item.prefix}` : ""}</b></div><div class="detail"><small>Passerelle</small><b>${esc(item.gateway || "—")}</b></div><div class="detail"><small>Sous-réseau</small><b>${esc(item.network || "—")}</b></div><div class="detail"><small>Vitesse</small><b>${item.speed_mbps || "—"} Mb/s</b></div><div class="detail"><small>MTU</small><b>${item.mtu || 1500}</b></div></div></article>`).join("");
+  const cards = managed.map((item, index) => `<article class="network-card" style="--accent:${interfaceColor(index)}"><div class="network-card-head"><span class="nic-icon">↔</span><h3>${esc(item.name.toUpperCase())}</h3><span class="badge blue">Gérée</span><span class="badge ${item.up ? "green" : "red"}">${item.up ? "Connectée" : "Hors ligne"}</span></div><div class="network-details"><div class="detail"><small>Adresse IP</small><b>${esc(item.address || "Non configurée")}${item.prefix ? `/${item.prefix}` : ""}</b></div><div class="detail"><small>Passerelle</small><b>${esc(item.gateway || "—")}</b></div><div class="detail"><small>Sous-réseau</small><b>${esc(item.network || "—")}</b></div><div class="detail"><small>Vitesse</small><b>${item.speed_mbps || "—"} Mb/s</b></div><div class="detail"><small>MTU</small><b>${item.mtu || 1500}</b></div></div></article>`).join("");
   const distinct = configuredNetworks.length >= 2 && !hasNetworkConflict;
-  $("#content").innerHTML = `<div class="split"><div><div class="toolbar"><div><h2>Interfaces détectées</h2><p>ETH0, ETH1 et Tailscale uniquement.</p></div><button class="secondary" id="rediscover">↻ Actualiser</button></div><div class="network-stack">${cards || `<div class="recommendation warning"><h3>Aucune interface</h3><p>Vérifiez network_mode: host dans Compose.</p></div>`}</div><div class="recommendation ${distinct ? "" : "warning"}"><h3>${distinct ? "Sous-réseaux distincts détectés" : "Sous-réseaux distincts recommandés"}</h3><p>ETH0 utilise normalement 192.168.1.0/24. Configurez ETH1 sur 192.168.2.0/24 avec une passerelle 192.168.2.1 pour éviter les conflits de routage et les réponses asymétriques.</p></div></div>
+  const eth0 = physical.find(item => item.name.toLowerCase() === "eth0");
+  const eth1 = physical.find(item => item.name.toLowerCase() === "eth1");
+  let networkNotice;
+  if (distinct) {
+    networkNotice = `<div class="recommendation"><h3>Configuration correcte : sous-réseaux distincts</h3><p>ETH0 utilise <b>${esc(eth0.network)}</b> et ETH1 utilise <b>${esc(eth1.network)}</b>. Les deux routes peuvent être sélectionnées séparément ; aucune modification n’est demandée.</p></div>`;
+  } else if (hasNetworkConflict) {
+    networkNotice = `<div class="recommendation warning"><h3>Conflit détecté : même sous-réseau</h3><p>ETH0 et ETH1 utilisent tous les deux <b>${esc(addressedNetworks[0])}</b>. Placez ETH1 sur un autre réseau, par exemple <b>192.168.2.131/24</b> avec la passerelle <b>192.168.2.1</b>.</p></div>`;
+  } else {
+    networkNotice = `<div class="recommendation warning"><h3>Deuxième sortie incomplète</h3><p>${eth1 ? "ETH1 n’a pas encore une adresse et une passerelle utilisables." : "ETH1 n’a pas été détectée."} La configuration proposée est <b>192.168.2.131/24</b> avec une passerelle <b>192.168.2.1</b>.</p></div>`;
+  }
+  $("#content").innerHTML = `<div class="split"><div><div class="toolbar"><div><h2>Interfaces gérées</h2><p>Seules ETH0, ETH1 et Tailscale peuvent être utilisées par DualRoute.</p></div><button class="secondary" id="rediscover">↻ Actualiser</button></div><div class="network-stack">${cards || `<div class="recommendation warning"><h3>Aucune interface gérée</h3><p>Vérifiez network_mode: host dans Compose.</p></div>`}</div>${networkNotice}</div>
     <section class="panel" style="margin-top:0"><div class="panel-head"><div><h2>Configuration ETH1</h2><p>Tester avant d’appliquer</p></div></div><form id="network-form" class="config-form"><label>Interface<select name="interface"><option value="eth1">ETH1</option></select></label><div class="form-grid"><label>Adresse IP<input name="address" value="${esc(proposedAddress)}" required></label><label>Préfixe<input name="prefix" type="number" value="${configured.prefix || 24}" min="1" max="32"></label></div><label>Passerelle<input name="gateway" value="${esc(proposedGateway)}" required></label><div class="form-grid"><label>DNS<input name="dns" value="${esc(proposedGateway)}, 1.1.1.1"></label><label>MTU<input name="mtu" type="number" value="${configured.mtu || 1500}"></label></div><div class="form-actions"><button type="button" class="secondary" id="test-network">▷ Tester</button><button type="submit" class="primary">Appliquer</button></div><pre id="network-result" class="code-preview">Aucun test lancé.</pre></form></section></div>
-    <section class="panel"><div class="panel-head"><div><h2>Journal de détection et de configuration</h2><p>Les événements réseau apparaissent ici après chaque test ou application.</p></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Interface</th><th>État</th><th>Adresse</th><th>Passerelle</th><th>Sous-réseau</th><th>Lien</th></tr></thead><tbody>${interfaces.map(item => `<tr><td>${esc(item.name)}</td><td><span class="badge ${item.up ? "green" : "red"}">${item.up ? "Active" : "Inactive"}</span></td><td>${esc(item.address || "—")}</td><td>${esc(item.gateway || "—")}</td><td>${esc(item.network || "—")}</td><td>${item.speed_mbps || 0} Mb/s</td></tr>`).join("") || tableEmpty(6, "Aucune donnée")}</tbody></table></div></section>`;
+    <section class="panel"><div class="panel-head"><div><h2>Toutes les interfaces détectées</h2><p>${managed.length} gérées • ${detectedOnly.length} observées seulement. Les interfaces Docker, bridges et virtuelles ne sont jamais modifiées.</p></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Interface</th><th>Périmètre</th><th>Type</th><th>État</th><th>Adresse</th><th>Passerelle</th><th>Sous-réseau</th><th>Lien</th></tr></thead><tbody>${interfaces.map(item => `<tr><td><b>${esc(item.name)}</b></td><td><span class="badge ${item.managed ? "blue" : "amber"}">${item.managed ? "Gérée" : "Observation seule"}</span></td><td>${esc(item.kind || "—")}</td><td><span class="badge ${item.up ? "green" : "red"}">${item.up ? "Active" : "Inactive"}</span></td><td>${esc(item.address || "—")}</td><td>${esc(item.gateway || "—")}</td><td>${esc(item.network || "—")}</td><td>${item.speed_mbps || 0} Mb/s</td></tr>`).join("") || tableEmpty(8, "Aucune donnée")}</tbody></table></div></section>`;
   $("#rediscover").onclick = () => refreshSnapshot(true);
   $("#test-network").onclick = () => testNetwork(false);
   $("#network-form").onsubmit = event => { event.preventDefault(); testNetwork(true); };
@@ -239,7 +283,8 @@ function renderEvents() {
 function renderSettings() {
   const settings = appState.snapshot.settings;
   $("#content").innerHTML = `<div class="settings-grid"><section class="setting-card"><h3>Application des règles</h3><p>Le mode actif autorise DualRoute à modifier nftables et les tables de routage Linux. Commencez par une prévisualisation.</p><label class="toggle-row"><span><b>Mode actif</b><small>${settings.enforcement_enabled ? "Les règles peuvent être appliquées" : "Prévisualisation uniquement"}</small></span><input id="enforcement" type="checkbox" ${settings.enforcement_enabled ? "checked" : ""}></label><div class="form-actions" style="margin-top:14px"><button class="secondary" id="preview-settings">Prévisualiser</button><button class="primary" id="apply-settings">Appliquer les règles</button></div></section>
-    <section class="setting-card"><h3>Conservation des mesures</h3><p>Le volume SQLite augmente avec la fréquence et la durée de conservation.</p><div class="form-grid"><label>Intervalle (secondes)<input id="sample-interval" type="number" min="1" max="60" value="${settings.sample_interval_seconds || 2}"></label><label>Conservation (jours)<input id="retention-days" type="number" min="1" max="365" value="${settings.retention_days || 30}"></label></div><button class="primary" id="save-settings" style="margin-top:14px">Enregistrer</button></section>
+    <section class="setting-card"><h3>Affichage du trafic</h3><p>Choisissez l’unité utilisée pour tous les débits. 8 Mb/s correspondent à 1 Mo/s.</p><div class="form-grid"><label>Unité des débits<select id="display-rate-unit"><option value="mbps" ${settings.display_rate_unit !== "MBps" ? "selected" : ""}>Mb/s — mégabits par seconde</option><option value="MBps" ${settings.display_rate_unit === "MBps" ? "selected" : ""}>Mo/s — mégaoctets par seconde</option></select></label><label class="toggle-row compact"><span><b>Tableau de bord limité aux interfaces gérées</b><small>Afficher uniquement ETH0, ETH1 et Tailscale</small></span><input id="dashboard-managed-only" type="checkbox" ${settings.dashboard_managed_only !== false ? "checked" : ""}></label></div></section>
+    <section class="setting-card"><h3>Conservation des mesures</h3><p>Le volume SQLite augmente avec la fréquence et la durée de conservation.</p><div class="form-grid"><label>Intervalle (secondes)<input id="sample-interval" type="number" min="1" max="60" value="${settings.sample_interval_seconds || 2}"></label><label>Conservation (jours)<input id="retention-days" type="number" min="1" max="365" value="${settings.retention_days || 30}"></label></div><button class="primary" id="save-settings" style="margin-top:14px">Enregistrer tous les paramètres</button></section>
     <section class="setting-card" style="grid-column:1/-1"><h3>Prévisualisation technique</h3><p>Cette zone affiche les commandes et la table nftables générées sans modifier le NAS.</p><pre id="routing-preview" class="code-preview">Cliquez sur Prévisualiser pour générer le plan.</pre></section></div>`;
   $("#save-settings").onclick = saveSettings;
   $("#preview-settings").onclick = previewRouting;
@@ -266,7 +311,7 @@ function drawTrafficChart(canvas) {
   const width = rect.width; const height = rect.height;
   const pad = { left: 48, right: 12, top: 12, bottom: 25 };
   const innerW = width - pad.left - pad.right; const innerH = height - pad.top - pad.bottom;
-  const interfaces = appState.snapshot.interfaces.slice(0, 3);
+  const interfaces = appState.page === "dashboard" ? dashboardInterfaces() : managedInterfaces();
   const series = interfaces.map(item => appState.history.filter(row => row.interface === item.name).slice(-240));
   const values = series.flatMap(rows => rows.flatMap(row => [Number(row.rx_bps), Number(row.tx_bps)]));
   const max = Math.max(...values, 1) * 1.12;
@@ -304,7 +349,7 @@ function setPage(page) {
 
 function populateRuleForm(rule, appId) {
   const form = $("#rule-form");
-  const interfaces = appState.snapshot.interfaces.slice(0, 2);
+  const interfaces = managedInterfaces().filter(item => ["eth0", "eth1"].includes(item.name.toLowerCase()));
   form.elements.app_id.innerHTML = appState.snapshot.apps.map(app => `<option value="${esc(app.id)}">${esc(app.name)}</option>`).join("");
   const interfaceOptions = interfaces.map(item => `<option value="${esc(item.name)}">${esc(item.name.toUpperCase())}</option>`).join("");
   form.elements.primary_interface.innerHTML = interfaceOptions;
@@ -325,9 +370,13 @@ function populateRuleForm(rule, appId) {
   updateRoutePreview();
 }
 
-function openRuleDialog(ruleId = null, appId = null) {
+function openRuleDialog(ruleId = null, appId = null, strategy = null) {
   const rule = appState.snapshot.rules.find(item => item.id === ruleId);
   populateRuleForm(rule, appId);
+  if (strategy && !rule) {
+    $("#rule-form").elements.strategy.value = strategy;
+    updateRoutePreview();
+  }
   $("#rule-dialog").showModal();
 }
 
@@ -341,6 +390,8 @@ function updateRoutePreview() {
   if (strategy === "balance" && fallback) value = `${primary.toUpperCase()} ⇄ ${fallback.toUpperCase()} • répartition 50/50`;
   if (strategy === "force") value = `Tout le trafic utilisera ${primary.toUpperCase()}`;
   $("#route-preview").textContent = value;
+  $("#strategy-help").textContent = strategyDescriptions[strategy] || "";
+  form.elements.fallback_interface.closest("label").classList.toggle("field-disabled", !["prefer", "balance"].includes(strategy));
 }
 
 async function saveRule(event) {
@@ -424,6 +475,8 @@ async function saveSettings() {
     enforcement_enabled: $("#enforcement").checked,
     sample_interval_seconds: Number($("#sample-interval").value),
     retention_days: Number($("#retention-days").value),
+    display_rate_unit: $("#display-rate-unit").value,
+    dashboard_managed_only: $("#dashboard-managed-only").checked,
   };
   try { await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) }); toast("Paramètres enregistrés"); await refreshSnapshot(true); }
   catch (error) { toast(error.message, true); }

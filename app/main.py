@@ -106,7 +106,7 @@ async def lifespan(_: FastAPI):
             pass
 
 
-app = FastAPI(title="DualRoute", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="DualRoute", version="0.2.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
 

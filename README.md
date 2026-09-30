@@ -6,16 +6,17 @@ DualRoute est une interface web auto-hébergée pour administrer deux sorties Et
 
 ## Fonctions disponibles
 
-- découverte automatique des interfaces, adresses, passerelles et conteneurs Docker ;
+- découverte automatique de toutes les interfaces, avec une séparation explicite entre les interfaces gérées (`eth0`, `eth1`, Tailscale) et celles affichées en observation seule ;
 - règles par application : interface forcée, préférence avec bascule, équilibrage par connexion et marquage QoS DSCP ;
 - conservation SQLite des règles, événements et mesures ;
 - surveillance temps réel et historique d'`eth0` et `eth1` ;
+- affichage des débits au choix en `Mb/s` ou `Mo/s`, et option pour limiter le tableau de bord aux interfaces gérées ;
 - routage symétrique des connexions entrantes grâce aux marques de connexion ;
 - prise en charge de SMB comme service système ;
 - prévisualisation complète des commandes avant activation ;
 - surveillance des passerelles et bascule automatique toutes les quinze secondes en mode actif.
 
-La première version enregistre les limites de débit configurées dans l'interface, mais ne crée pas encore de classes `tc` pour les appliquer. Les priorités QoS sont appliquées par marquage DSCP. Le routeur ou le fournisseur d'accès doit respecter ces marques pour qu'elles influencent la file WAN.
+Les limites de débit configurées sont affichées dans les règles et conservées, mais ne créent pas encore de classes `tc` locales. Les priorités QoS sont appliquées par marquage DSCP. Le routeur ou le fournisseur d'accès doit respecter ces marques pour qu'elles influencent la file WAN.
 
 ## Topologie recommandée
 

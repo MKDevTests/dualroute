@@ -60,3 +60,5 @@ class SettingInput(BaseModel):
     enforcement_enabled: bool
     sample_interval_seconds: int = Field(default=2, ge=1, le=60)
     retention_days: int = Field(default=30, ge=1, le=365)
+    display_rate_unit: Literal["mbps", "MBps"] = "mbps"
+    dashboard_managed_only: bool = True
