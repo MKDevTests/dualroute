@@ -7,6 +7,14 @@ const appState = {
   history: [],
   events: [],
   flows: [],
+  flowStatus: { available: false, message: "Chargement des connexions…" },
+  flowPrevious: {},
+  tableViews: {},
+  trafficHours: 1,
+  liveTraffic: true,
+  refreshing: false,
+  pendingForceRender: false,
+  resizingTable: false,
   lastHistoryFetch: 0,
   snapshotPolls: 0,
 };
@@ -106,7 +114,124 @@ function tableEmpty(columns, message) {
   return `<tr><td colspan="${columns}" class="table-empty">${esc(message)}</td></tr>`;
 }
 
+function captureScrollState() {
+  return {
+    content: $("#content")?.scrollTop || 0,
+    tables: Object.fromEntries($$(".table-scroll").map((element, index) => [element.dataset.scrollId || index, {top: element.scrollTop, left: element.scrollLeft}])),
+  };
+}
+
+function restoreScrollState(state) {
+  if (!state) return;
+  $("#content").scrollTop = state.content;
+  $$(".table-scroll").forEach((element, index) => {
+    const position = state.tables[element.dataset.scrollId || index];
+    element.scrollTop = position?.top || 0;
+    element.scrollLeft = position?.left || 0;
+  });
+}
+
+function compareTableValues(left, right) {
+  return String(left).localeCompare(String(right), "fr", { numeric: true, sensitivity: "base" });
+}
+
+function applyTableView(table, state) {
+  const rows = [...table.tBodies[0].rows].filter(row => !row.querySelector(".table-empty"));
+  rows.forEach(row => {
+    const visible = state.filters.every((filter, index) => {
+      if (!filter) return true;
+      return (row.cells[index]?.textContent || "").toLocaleLowerCase("fr").includes(filter.toLocaleLowerCase("fr"));
+    });
+    row.hidden = !visible;
+  });
+  if (state.sortIndex !== null) {
+    rows.sort((left, right) => {
+      const leftCell = left.cells[state.sortIndex];
+      const rightCell = right.cells[state.sortIndex];
+      const result = leftCell?.dataset.sort !== undefined && rightCell?.dataset.sort !== undefined
+        ? Number(leftCell.dataset.sort) - Number(rightCell.dataset.sort)
+        : compareTableValues(leftCell?.textContent ?? "", rightCell?.textContent ?? "");
+      return state.sortDirection === "asc" ? result : -result;
+    }).forEach(row => table.tBodies[0].appendChild(row));
+  }
+}
+
+function enhanceTables() {
+  $$("table.data-table").forEach((table, tableIndex) => {
+    const id = `${appState.page}-${tableIndex}`;
+    table.dataset.tableId = id;
+    table.closest(".table-scroll").dataset.scrollId = id;
+    const headers = [...table.tHead.rows[0].cells];
+    const state = appState.tableViews[id] || { filters: Array(headers.length).fill(""), sortIndex: null, sortDirection: "asc" };
+    while (state.filters.length < headers.length) state.filters.push("");
+    appState.tableViews[id] = state;
+    headers.forEach((header, index) => {
+      const label = header.dataset.label || header.textContent.trim();
+      header.dataset.label = label;
+      header.classList.add("sortable");
+      header.title = `Trier par ${label}`;
+      header.setAttribute("aria-sort", state.sortIndex === index ? (state.sortDirection === "asc" ? "ascending" : "descending") : "none");
+      header.innerHTML = `<span>${esc(label)}</span><span class="sort-indicator">${state.sortIndex === index ? (state.sortDirection === "asc" ? "▲" : "▼") : "↕"}</span><span class="column-resizer" aria-label="Redimensionner ${esc(label)}"></span>`;
+      header.tabIndex = 0;
+      header.onkeydown = event => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); header.click(); } };
+      if (state.widths?.[index]) header.style.width = `${state.widths[index]}px`;
+      $(".column-resizer", header).onpointerdown = event => {
+        event.preventDefault(); event.stopPropagation();
+        appState.resizingTable = true;
+        const start = event.clientX;
+        const width = header.getBoundingClientRect().width;
+        const totalWidth = table.getBoundingClientRect().width;
+        const widths = headers.map(item => item.getBoundingClientRect().width);
+        const move = pointer => {
+          const nextWidth = Math.max(70, width + pointer.clientX - start);
+          widths[index] = nextWidth;
+          headers.forEach((item, i) => { item.style.width = `${widths[i]}px`; });
+          table.style.width = `${totalWidth + nextWidth - width}px`;
+          state.widths = widths;
+        };
+        const stop = () => { appState.resizingTable = false; document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", stop); document.removeEventListener("pointercancel", stop); };
+        document.addEventListener("pointermove", move);
+        document.addEventListener("pointerup", stop);
+        document.addEventListener("pointercancel", stop);
+      };
+      header.onclick = event => {
+        if (event.target.closest("input, .column-resizer")) return;
+        if (state.sortIndex === index) state.sortDirection = state.sortDirection === "asc" ? "desc" : "asc";
+        else { state.sortIndex = index; state.sortDirection = "asc"; }
+        enhanceTables();
+      };
+    });
+    if (state.widths) table.style.width = `${state.widths.reduce((total, width) => total + width, 0)}px`;
+    if (table.tHead.rows.length === 1) {
+      const filterRow = table.tHead.insertRow();
+      filterRow.className = "filter-row";
+      headers.forEach((header, index) => {
+        const cell = document.createElement("th");
+        const input = document.createElement("input");
+        input.className = "table-filter";
+        input.type = "search";
+        input.placeholder = "Filtrer…";
+        input.setAttribute("aria-label", `Filtrer ${header.dataset.label}`);
+        input.value = state.filters[index] || "";
+        input.onclick = event => event.stopPropagation();
+        input.oninput = () => {
+          state.filters[index] = input.value;
+          applyTableView(table, state);
+        };
+        cell.appendChild(input);
+        filterRow.appendChild(cell);
+      });
+    }
+    applyTableView(table, state);
+  });
+}
+
 async function refreshSnapshot(forceRender = false) {
+  if (appState.refreshing) {
+    appState.pendingForceRender ||= forceRender;
+    return;
+  }
+  appState.refreshing = true;
   try {
     appState.snapshotPolls += 1;
     const includeAppStats = forceRender || appState.snapshotPolls % 4 === 0;
@@ -118,10 +243,21 @@ async function refreshSnapshot(forceRender = false) {
     const otherCount = appState.snapshot.interfaces.length - managedCount;
     $("#side-count").textContent = `${appState.snapshot.apps.length} applications • ${managedCount} gérées${otherCount ? ` • ${otherCount} autres` : ""}`;
     $("#last-update").textContent = `Actualisé à ${new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
-    if (forceRender || !$("#rule-dialog").open) renderPage();
+    if (appState.page === "traffic" && appState.liveTraffic) {
+      await Promise.all([refreshFlows(), ensureHistory(appState.trafficHours)]);
+    }
+    const activeEditor = document.activeElement?.matches("input, select, textarea");
+    const livePage = appState.page === "dashboard" || (appState.page === "traffic" && appState.liveTraffic);
+    if (forceRender || (livePage && !$("#rule-dialog").open && !activeEditor && !appState.resizingTable)) renderPage(true);
   } catch (error) {
     $("#last-update").textContent = "API indisponible";
     toast(error.message, true);
+  } finally {
+    appState.refreshing = false;
+    if (appState.pendingForceRender) {
+      appState.pendingForceRender = false;
+      await refreshSnapshot(true);
+    }
   }
 }
 
@@ -130,6 +266,26 @@ async function ensureHistory(hours = 1, force = false) {
   appState.history = await api(`/api/traffic/history?hours=${hours}`);
   appState.lastHistoryFetch = Date.now();
 }
+
+async function refreshFlows() {
+  const result = await api("/api/traffic/flows?limit=1000");
+  const now = Date.now();
+  const previous = appState.flowPrevious;
+  const next = {};
+  appState.flows = result.items.map(flow => {
+    const old = previous[flow.id];
+    const elapsed = old ? Math.max((now - old.ts) / 1000, 0.001) : 0;
+    const measured = flow.accounting && old?.accounting && elapsed;
+    const rxBps = measured ? Math.max(0, flow.rx_bytes - old.rx_bytes) * 8 / elapsed : null;
+    const txBps = measured ? Math.max(0, flow.tx_bytes - old.tx_bytes) * 8 / elapsed : null;
+    next[flow.id] = { ts: now, rx_bytes: flow.rx_bytes, tx_bytes: flow.tx_bytes, accounting: flow.accounting };
+    return { ...flow, rx_bps: rxBps, tx_bps: txBps };
+  });
+  appState.flowPrevious = next;
+  appState.flowStatus = result;
+}
+
+function flowRate(value) { return value === null ? "—" : formatRate(value); }
 
 function interfaceCard(item, index) {
   const metric = appState.snapshot.metrics[item.name] || {};
@@ -159,8 +315,8 @@ function renderDashboard() {
       <td><div class="app-cell"><span class="app-icon">${app.type === "docker" ? "◇" : "▣"}</span>${esc(app.name)}</div></td>
       <td>${rule ? `<span class="badge blue">${esc(strategyLabels[rule.strategy])}</span>` : `<span class="muted">Automatique</span>`}</td>
       <td>${rule ? interfaceBadge(rule.primary_interface) : "—"}</td>
-      <td>${formatBytes((appState.snapshot.app_stats[app.id] || {}).rx_bytes)}</td>
-      <td>${formatBytes((appState.snapshot.app_stats[app.id] || {}).tx_bytes)}</td>
+      <td data-sort="${(appState.snapshot.app_stats[app.id] || {}).rx_bytes || 0}">${formatBytes((appState.snapshot.app_stats[app.id] || {}).rx_bytes)}</td>
+      <td data-sort="${(appState.snapshot.app_stats[app.id] || {}).tx_bytes || 0}">${formatBytes((appState.snapshot.app_stats[app.id] || {}).tx_bytes)}</td>
       <td><span class="badge green"><span class="status-dot"></span>${esc(app.status)}</span></td>
     </tr>`;
   }).join("");
@@ -205,7 +361,7 @@ function renderRules() {
     <td>${esc(directionLabels[rule.direction])}</td><td><span class="badge blue">${esc(strategyLabels[rule.strategy])}</span></td>
     <td>${interfaceBadge(rule.primary_interface)}</td><td>${rule.fallback_interface ? interfaceBadge(rule.fallback_interface) : "—"}</td>
     <td>${rule.download_limit_mbps ? `↓ ${rule.download_limit_mbps}` : "↓ ∞"} / ${rule.upload_limit_mbps ? `↑ ${rule.upload_limit_mbps}` : "↑ ∞"} Mb/s</td>
-    <td><span title="1 = priorité minimale, 5 = priorité maximale">${rule.qos}/5 — ${qosLabels[rule.qos] || "normale"}</span></td><td><span class="badge ${rule.enabled ? "green" : "amber"}"><span class="status-dot"></span>${rule.enabled ? "Activée" : "Suspendue"}</span></td>
+    <td data-sort="${rule.qos}"><span title="1 = priorité minimale, 5 = priorité maximale">${rule.qos}/5 — ${qosLabels[rule.qos] || "normale"}</span></td><td><span class="badge ${rule.enabled ? "green" : "amber"}"><span class="status-dot"></span>${rule.enabled ? "Activée" : "Suspendue"}</span></td>
     <td><div class="row-actions"><button data-edit-rule="${rule.id}">Modifier</button><button data-delete-rule="${rule.id}">Supprimer</button></div></td>
   </tr>`).join("");
   $("#content").innerHTML = `<div class="toolbar"><div><h2>Une règle par application</h2><p>Choisissez précisément comment chaque application utilise ETH0 et ETH1.</p></div><div class="toolbar-actions"><button class="secondary" id="preview-rules">Prévisualiser</button><button class="primary" id="new-rule">＋ Nouvelle règle</button></div></div>
@@ -227,20 +383,75 @@ function renderTraffic() {
   const interfaces = managedInterfaces();
   const totalRx = interfaces.reduce((sum, item) => sum + Number((appState.snapshot.metrics[item.name] || {}).rx_bps || 0), 0);
   const totalTx = interfaces.reduce((sum, item) => sum + Number((appState.snapshot.metrics[item.name] || {}).tx_bps || 0), 0);
-  const recent = appState.history.slice(-120).reverse();
-  const rows = recent.map(sample => `<tr><td>${new Date(sample.ts).toLocaleTimeString("fr-FR")}</td><td>${interfaceBadge(sample.interface)}</td><td>Entrant</td><td>${formatRate(sample.rx_bps)}</td><td>Sortant</td><td>${formatRate(sample.tx_bps)}</td><td>${formatBytes(sample.rx_bytes)}</td><td>${formatBytes(sample.tx_bytes)}</td></tr>`).join("");
+  const groups = new Map();
+  appState.flows.forEach(flow => {
+    const group = groups.get(flow.app_id) || {
+      app_id: flow.app_id, application: flow.application, container_id: flow.container_id,
+      app_type: flow.app_type, connections: 0, interfaces: new Set(), rx_bps: 0, tx_bps: 0,
+      rx_bytes: 0, tx_bytes: 0, measured: true, accounting: true,
+    };
+    group.connections += 1;
+    group.measured = group.measured && flow.rx_bps !== null;
+    group.accounting = group.accounting && flow.accounting;
+    group.interfaces.add(flow.interface || "Route système");
+    group.rx_bps += flow.rx_bps;
+    group.tx_bps += flow.tx_bps;
+    group.rx_bytes += flow.rx_bytes;
+    group.tx_bytes += flow.tx_bytes;
+    groups.set(flow.app_id, group);
+  });
+  const appRows = [...groups.values()].sort((left, right) => (right.rx_bps + right.tx_bps) - (left.rx_bps + left.tx_bps)).map(group => {
+    const rule = appState.snapshot.rules.find(item => item.app_id === group.app_id);
+    return `<tr>
+      <td><div class="app-cell"><span class="app-icon">${group.app_type === "docker" ? "◇" : group.app_type === "system" ? "▣" : "⌂"}</span><span>${esc(group.application)}${group.container_id ? `<small>${esc(group.container_id)}</small>` : ""}</span></div></td>
+      <td data-sort="${group.connections}">${group.connections}</td>
+      <td>${[...group.interfaces].map(interfaceBadge).join(" ")}</td>
+      <td>${rule ? esc(strategyLabels[rule.strategy]) : "Route système"}</td>
+      <td data-sort="${group.measured ? group.rx_bps : -1}">${group.measured ? formatRate(group.rx_bps) : "—"}</td>
+      <td data-sort="${group.measured ? group.tx_bps : -1}">${group.measured ? formatRate(group.tx_bps) : "—"}</td>
+      <td data-sort="${group.accounting ? group.rx_bytes : -1}">${group.accounting ? formatBytes(group.rx_bytes) : "—"}</td>
+      <td data-sort="${group.accounting ? group.tx_bytes : -1}">${group.accounting ? formatBytes(group.tx_bytes) : "—"}</td>
+    </tr>`;
+  }).join("");
+  const connectionRows = appState.flows.map(flow => `<tr>
+    <td><div class="app-cell"><span class="app-icon">${flow.app_type === "docker" ? "◇" : flow.app_type === "system" ? "▣" : "⌂"}</span><span>${esc(flow.application)}${flow.container_id ? `<small>${esc(flow.container_id)}</small>` : ""}</span></div></td>
+    <td><span class="badge ${flow.direction === "entrant" ? "teal" : "blue"}">${esc(flow.direction)}</span></td>
+    <td>${esc(flow.protocol)}</td><td>${esc(flow.state)}</td>
+    <td title="${esc(flow.local_endpoint)}">${esc(flow.local_endpoint)}</td>
+    <td title="${esc(flow.remote_endpoint)}">${esc(flow.remote_endpoint)}</td>
+    <td>${esc(flow.service)}</td>
+    <td title="${esc(flow.interface_source || 'Interface non identifiée')}">${flow.interface ? interfaceBadge(flow.interface) : `<span class="muted">Non identifiée</span>`}</td>
+    <td data-sort="${flow.rx_bps ?? -1}">${flowRate(flow.rx_bps)}</td>
+    <td data-sort="${flow.tx_bps ?? -1}">${flowRate(flow.tx_bps)}</td>
+    <td data-sort="${flow.accounting ? flow.rx_bytes + flow.tx_bytes : -1}">${flow.accounting ? formatBytes(flow.rx_bytes + flow.tx_bytes) : "—"}</td>
+    <td data-sort="${flow.timeout_seconds}">${flow.timeout_seconds} s</td>
+  </tr>`).join("");
+  const managedNames = new Set(interfaces.map(item => item.name));
+  const recent = appState.history.filter(sample => managedNames.has(sample.interface)).slice(-240).reverse();
+  const rows = recent.map(sample => `<tr><td data-sort="${new Date(sample.ts).getTime()}">${new Date(sample.ts).toLocaleTimeString("fr-FR")}</td><td>${interfaceBadge(sample.interface)}</td><td>Entrant</td><td data-sort="${sample.rx_bps}">${formatRate(sample.rx_bps)}</td><td>Sortant</td><td data-sort="${sample.tx_bps}">${formatRate(sample.tx_bps)}</td><td data-sort="${sample.rx_bytes}">${formatBytes(sample.rx_bytes)}</td><td data-sort="${sample.tx_bytes}">${formatBytes(sample.tx_bytes)}</td></tr>`).join("");
   $("#content").innerHTML = `<div class="kpi-grid">
     <div class="kpi" style="--accent:var(--teal)"><span class="kpi-icon">▥</span><div><small>Débit total</small><b>${formatRate(totalRx + totalTx)}</b></div></div>
     ${interfaces.map((item,index) => `<div class="kpi" style="--accent:${interfaceColor(index)}"><span class="kpi-icon">↔</span><div><small>${esc(item.name.toUpperCase())}</small><b>${formatRate(((appState.snapshot.metrics[item.name] || {}).rx_bps || 0) + ((appState.snapshot.metrics[item.name] || {}).tx_bps || 0))}</b></div></div>`).join("")}
-    <div class="kpi" style="--accent:var(--green)"><span class="kpi-icon">◎</span><div><small>Applications</small><b>${appState.snapshot.apps.length}</b></div></div>
+    <div class="kpi" style="--accent:var(--green)"><span class="kpi-icon">◎</span><div><small>Connexions actives</small><b>${appState.flows.length}</b></div></div>
   </div>
-  <section class="panel"><div class="panel-head"><div><h2>Trafic réseau</h2><p>Historique reçu et envoyé pour chaque interface</p></div><div class="filters"><button class="chip-button active" data-hours="1">1 h</button><button class="chip-button" data-hours="24">24 h</button><button class="chip-button" data-hours="168">7 j</button></div></div><div class="chart-wrap large"><canvas id="traffic-chart"></canvas></div></section>
-  <section class="panel"><div class="panel-head"><div><h2>Échantillons récents</h2><p>Valeurs brutes conservées pour l’analyse</p></div><span class="muted">Réception ${formatRate(totalRx)} • Envoi ${formatRate(totalTx)}</span></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Heure</th><th>Interface</th><th>Sens</th><th>Débit</th><th>Sens</th><th>Débit</th><th>Total reçu</th><th>Total envoyé</th></tr></thead><tbody>${rows || tableEmpty(8, "Collecte des premières mesures…")}</tbody></table></div></section>`;
+  <div class="traffic-status ${appState.flowStatus.available ? "" : "warning"}"><span>${esc(appState.flowStatus.message)}</span><button class="chip-button ${appState.liveTraffic ? "active" : ""}" id="toggle-live">${appState.liveTraffic ? "● Actualisation automatique" : "Ⅱ Actualisation en pause"}</button></div>
+  ${appState.flowStatus.available && !appState.flowStatus.accounting_enabled ? `<div class="recommendation warning"><h3>Activer les débits par connexion</h3><p>Les compteurs Linux sont désactivés. Depuis SSH sur le NAS, exécutez <code>sudo sysctl -w net.netfilter.nf_conntrack_acct=1</code>. Les compteurs seront disponibles sur les nouvelles connexions. Les valeurs absentes sont affichées « — ».</p></div>` : ""}
+  ${appState.flowStatus.accounting_enabled && appState.flowStatus.accounting_missing ? `<p class="traffic-note">${appState.flowStatus.accounting_missing} connexions créées sans compteurs : débit indisponible jusqu’à leur renouvellement.</p>` : ""}
+  ${appState.flowStatus.truncated ? `<p class="traffic-note">Affichage limité à ${appState.flows.length} connexions sur ${appState.flowStatus.total}. Les synthèses portent sur les flux affichés.</p>` : ""}
+  <section class="panel"><div class="panel-head"><div><h2>Trafic actuel par application</h2><p>Débits des connexions suivies • volumes cumulés des connexions encore présentes</p></div><span class="muted">Cliquez sur une colonne pour trier • filtres sous les titres</span></div><div class="table-scroll"><table class="data-table"><thead><tr><th style="width:22%">Application / conteneur</th><th>Connexions</th><th>Interface actuelle</th><th>Règle</th><th>Reçu/s</th><th>Envoyé/s</th><th>Total reçu</th><th>Total envoyé</th></tr></thead><tbody>${appRows || tableEmpty(8, appState.flowStatus.available ? "Aucune connexion active attribuable" : appState.flowStatus.message)}</tbody></table></div></section>
+  <section class="panel"><div class="panel-head"><div><h2>Connexions actives</h2><p>Application, endpoints, protocole et route de chaque flux IPv4 suivi par conntrack</p></div><span class="muted">${appState.flows.length} flux</span></div><div class="table-scroll tall"><table class="data-table wide"><thead><tr><th style="width:210px">Application / conteneur</th><th>Sens</th><th>Protocole</th><th>État</th><th style="width:155px">Endpoint local</th><th style="width:175px">Destination / client</th><th>Service</th><th>Interface</th><th>Reçu/s</th><th>Envoyé/s</th><th>Volume</th><th>Expiration</th></tr></thead><tbody>${connectionRows || tableEmpty(12, appState.flowStatus.available ? "Aucune connexion active" : appState.flowStatus.message)}</tbody></table></div></section>
+  <section class="panel"><div class="panel-head"><div><h2>Historique par interface</h2><p>Trafic reçu et envoyé pour chaque interface gérée</p></div><div class="filters"><button class="chip-button ${appState.trafficHours === 1 ? "active" : ""}" data-hours="1">1 h</button><button class="chip-button ${appState.trafficHours === 24 ? "active" : ""}" data-hours="24">24 h</button><button class="chip-button ${appState.trafficHours === 168 ? "active" : ""}" data-hours="168">7 j</button></div></div><div class="chart-wrap large"><canvas id="traffic-chart"></canvas></div></section>
+  <section class="panel"><div class="panel-head"><div><h2>Échantillons historiques</h2><p>Valeurs conservées pour l’analyse par interface</p></div><span class="muted">Réception ${formatRate(totalRx)} • Envoi ${formatRate(totalTx)}</span></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Heure</th><th>Interface</th><th>Sens</th><th>Débit</th><th>Sens</th><th>Débit</th><th>Total reçu</th><th>Total envoyé</th></tr></thead><tbody>${rows || tableEmpty(8, "Collecte des premières mesures…")}</tbody></table></div></section>`;
   drawTrafficChart($("#traffic-chart"));
+  $("#toggle-live").onclick = async () => {
+    appState.liveTraffic = !appState.liveTraffic;
+    if (appState.liveTraffic) await refreshSnapshot(true);
+    else renderPage(true);
+  };
   $$('[data-hours]').forEach(button => button.onclick = async () => {
-    $$('[data-hours]').forEach(item => item.classList.toggle("active", item === button));
-    await ensureHistory(Number(button.dataset.hours), true);
-    renderTraffic();
+    appState.trafficHours = Number(button.dataset.hours);
+    await ensureHistory(appState.trafficHours, true);
+    renderPage(true);
   });
 }
 
@@ -269,14 +480,14 @@ function renderNetwork() {
   }
   $("#content").innerHTML = `<div class="split"><div><div class="toolbar"><div><h2>Interfaces gérées</h2><p>Seules ETH0, ETH1 et Tailscale peuvent être utilisées par DualRoute.</p></div><button class="secondary" id="rediscover">↻ Actualiser</button></div><div class="network-stack">${cards || `<div class="recommendation warning"><h3>Aucune interface gérée</h3><p>Vérifiez network_mode: host dans Compose.</p></div>`}</div>${networkNotice}</div>
     <section class="panel" style="margin-top:0"><div class="panel-head"><div><h2>Configuration ETH1</h2><p>Tester avant d’appliquer</p></div></div><form id="network-form" class="config-form"><label>Interface<select name="interface"><option value="eth1">ETH1</option></select></label><div class="form-grid"><label>Adresse IP<input name="address" value="${esc(proposedAddress)}" required></label><label>Préfixe<input name="prefix" type="number" value="${configured.prefix || 24}" min="1" max="32"></label></div><label>Passerelle<input name="gateway" value="${esc(proposedGateway)}" required></label><div class="form-grid"><label>DNS<input name="dns" value="${esc(proposedGateway)}, 1.1.1.1"></label><label>MTU<input name="mtu" type="number" value="${configured.mtu || 1500}"></label></div><div class="form-actions"><button type="button" class="secondary" id="test-network">▷ Tester</button><button type="submit" class="primary">Appliquer</button></div><pre id="network-result" class="code-preview">Aucun test lancé.</pre></form></section></div>
-    <section class="panel"><div class="panel-head"><div><h2>Toutes les interfaces détectées</h2><p>${managed.length} gérées • ${detectedOnly.length} observées seulement. Les interfaces Docker, bridges et virtuelles ne sont jamais modifiées.</p></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Interface</th><th>Périmètre</th><th>Type</th><th>État</th><th>Adresse</th><th>Passerelle</th><th>Sous-réseau</th><th>Lien</th></tr></thead><tbody>${interfaces.map(item => `<tr><td><b>${esc(item.name)}</b></td><td><span class="badge ${item.managed ? "blue" : "amber"}">${item.managed ? "Gérée" : "Observation seule"}</span></td><td>${esc(item.kind || "—")}</td><td><span class="badge ${item.up ? "green" : "red"}">${item.up ? "Active" : "Inactive"}</span></td><td>${esc(item.address || "—")}</td><td>${esc(item.gateway || "—")}</td><td>${esc(item.network || "—")}</td><td>${item.speed_mbps || 0} Mb/s</td></tr>`).join("") || tableEmpty(8, "Aucune donnée")}</tbody></table></div></section>`;
+    <section class="panel"><div class="panel-head"><div><h2>Toutes les interfaces détectées</h2><p>${managed.length} gérées • ${detectedOnly.length} observées seulement. Les interfaces Docker, bridges et virtuelles ne sont jamais modifiées.</p></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Interface</th><th>Périmètre</th><th>Type</th><th>État</th><th>Adresse</th><th>Passerelle</th><th>Sous-réseau</th><th>Lien</th></tr></thead><tbody>${interfaces.map(item => `<tr><td><b>${esc(item.name)}</b></td><td><span class="badge ${item.managed ? "blue" : "amber"}">${item.managed ? "Gérée" : "Observation seule"}</span></td><td>${esc(item.kind || "—")}</td><td><span class="badge ${item.up ? "green" : "red"}">${item.up ? "Active" : "Inactive"}</span></td><td>${esc(item.address || "—")}</td><td>${esc(item.gateway || "—")}</td><td>${esc(item.network || "—")}</td><td data-sort="${item.speed_mbps || 0}">${item.speed_mbps || 0} Mb/s</td></tr>`).join("") || tableEmpty(8, "Aucune donnée")}</tbody></table></div></section>`;
   $("#rediscover").onclick = () => refreshSnapshot(true);
   $("#test-network").onclick = () => testNetwork(false);
   $("#network-form").onsubmit = event => { event.preventDefault(); testNetwork(true); };
 }
 
 function renderEvents() {
-  const rows = appState.events.map(event => `<tr><td>${new Date(event.ts).toLocaleString("fr-FR")}</td><td><span class="badge ${event.level === "error" ? "red" : event.level === "warning" ? "amber" : "green"}">${esc(event.level)}</span></td><td>${esc(event.source)}</td><td>${esc(event.message)}</td><td>${esc(JSON.stringify(event.details || {}))}</td></tr>`).join("");
+  const rows = appState.events.map(event => `<tr><td data-sort="${new Date(event.ts).getTime()}">${new Date(event.ts).toLocaleString("fr-FR")}</td><td><span class="badge ${event.level === "error" ? "red" : event.level === "warning" ? "amber" : "green"}">${esc(event.level)}</span></td><td>${esc(event.source)}</td><td>${esc(event.message)}</td><td>${esc(JSON.stringify(event.details || {}))}</td></tr>`).join("");
   $("#content").innerHTML = `<div class="toolbar"><div><h2>Journal système</h2><p>Modifications de règles, configuration réseau et erreurs d’application.</p></div><button class="secondary" id="refresh-events">↻ Actualiser</button></div><section class="panel"><div class="table-scroll tall"><table class="data-table"><thead><tr><th style="width:180px">Date</th><th style="width:100px">Niveau</th><th style="width:120px">Source</th><th style="width:32%">Message</th><th>Détails</th></tr></thead><tbody>${rows || tableEmpty(5, "Aucun événement")}</tbody></table></div></section>`;
   $("#refresh-events").onclick = loadEvents;
 }
@@ -292,13 +503,16 @@ function renderSettings() {
   $("#apply-settings").onclick = applyRouting;
 }
 
-function renderPage() {
+function renderPage(preserveScroll = false) {
+  const scrollState = preserveScroll ? captureScrollState() : null;
   const [title, subtitle] = pageMeta[appState.page];
   $("#page-title").textContent = title;
   $("#page-subtitle").textContent = subtitle;
   $$("#nav button").forEach(button => button.classList.toggle("active", button.dataset.page === appState.page));
   const renderers = { dashboard: renderDashboard, apps: renderApps, rules: renderRules, traffic: renderTraffic, network: renderNetwork, events: renderEvents, settings: renderSettings };
   renderers[appState.page]();
+  enhanceTables();
+  restoreScrollState(scrollState);
 }
 
 function drawTrafficChart(canvas) {
@@ -344,7 +558,7 @@ function bindPageLinks() {
 function setPage(page) {
   appState.page = page;
   if (page === "events") loadEvents();
-  else if (page === "traffic") ensureHistory(1, true).then(renderPage);
+  else if (page === "traffic") Promise.all([ensureHistory(appState.trafficHours, true), refreshFlows()]).then(() => { if (appState.page === "traffic") renderPage(); }).catch(error => toast(error.message, true));
   else renderPage();
 }
 
@@ -494,7 +708,7 @@ async function applyRouting() {
 }
 
 async function loadEvents() {
-  try { appState.events = await api("/api/events?limit=500"); if (appState.page === "events") renderEvents(); }
+  try { appState.events = await api("/api/events?limit=500"); if (appState.page === "events") renderPage(true); }
   catch (error) { toast(error.message, true); }
 }
 

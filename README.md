@@ -11,6 +11,9 @@ DualRoute est une interface web auto-hébergée pour administrer deux sorties Et
 - conservation SQLite des règles, événements et mesures ;
 - surveillance temps réel et historique d'`eth0` et `eth1` ;
 - affichage des débits au choix en `Mb/s` ou `Mo/s`, et option pour limiter le tableau de bord aux interfaces gérées ;
+- tri par clic sur les en-têtes, filtres par colonne et redimensionnement des colonnes de tous les tableaux ;
+- connexions IPv4 suivies par `conntrack`, avec attribution aux IP Docker, aux ports publiés et au service SMB local ;
+- synthèse du trafic par application et détail des IP/ports, protocoles, états et interfaces identifiées ;
 - routage symétrique des connexions entrantes grâce aux marques de connexion ;
 - prise en charge de SMB comme service système ;
 - prévisualisation complète des commandes avant activation ;
@@ -39,6 +42,18 @@ docker compose up -d
 ```
 
 Ouvrir ensuite `http://ADRESSE_DU_NAS:9080`.
+
+Pour mesurer le débit de chaque connexion, activez la comptabilité Linux sur le NAS depuis SSH :
+
+```bash
+sudo sysctl -w net.netfilter.nf_conntrack_acct=1
+```
+
+Les compteurs sont ajoutés aux nouvelles connexions. Les connexions déjà ouvertes peuvent rester sans compteurs jusqu’à leur renouvellement. La page Trafic affiche « — » quand une mesure est indisponible et indique ce prérequis si nécessaire. Le réglage doit être réactivé après un redémarrage du NAS ou rendu persistant via la configuration système de ZimaOS.
+
+Dans Trafic, les volumes par application correspondent aux connexions encore présentes dans la table de suivi ; les connexions terminées entre deux mesures peuvent échapper au relevé. Les marques DualRoute identifient l’interface de routage ; pour les flux sans marque, un sous-réseau connecté donne une indication signalée comme estimée. Une interface non déterminable reste « Non identifiée ». Le trafic hôte sans IP Docker ou port publié identifiable apparaît comme « Hôte / non attribué ». L’encapsulation Tailscale peut apparaître comme trafic hôte ; les totaux des interfaces ne sont donc pas une somme exacte des flux attribués.
+
+Le rafraîchissement conserve le tri, les filtres, la largeur des colonnes et la position dans les tableaux. Les pages Paramètres et Réseau restent stables pendant la saisie. Un bouton permet de suspendre l’actualisation de Trafic.
 
 L'image publiée est `ghcr.io/mkdevtests/dualroute:latest`. Une image est également publiée avec le numéro de chaque tag Git, par exemple `ghcr.io/mkdevtests/dualroute:v0.1.0`.
 

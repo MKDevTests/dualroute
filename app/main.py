@@ -16,6 +16,7 @@ from .db import Store
 from .discovery import container_stats, discover_apps, discover_interfaces
 from .metrics import MetricsCollector
 from .models import ApplyRequest, NetworkConfigureRequest, NetworkConfigInput, Rule, RuleInput, SettingInput
+from .traffic import discover_flows
 from .network import (
     NetworkError,
     build_apply_plan,
@@ -106,7 +107,7 @@ async def lifespan(_: FastAPI):
             pass
 
 
-app = FastAPI(title="DualRoute", version="0.2.1", lifespan=lifespan)
+app = FastAPI(title="DualRoute", version="0.3.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
 
@@ -191,6 +192,11 @@ def delete_rule(rule_id: int) -> None:
 @app.get("/api/traffic/history")
 def traffic_history(hours: int = Query(default=1, ge=1, le=24 * 31)) -> list[dict[str, Any]]:
     return metrics.history(hours)
+
+
+@app.get("/api/traffic/flows")
+def traffic_flows(limit: int = Query(default=500, ge=1, le=2000)) -> dict[str, Any]:
+    return discover_flows(discover_apps(), limit, discover_interfaces())
 
 
 @app.get("/api/events")
