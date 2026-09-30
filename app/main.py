@@ -4,6 +4,8 @@ import asyncio
 import ipaddress
 import json
 import os
+import time
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -13,10 +15,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .db import Store
-from .discovery import container_stats, discover_apps, discover_interfaces
+from .discovery import discover_interfaces, public_apps
 from .metrics import MetricsCollector
-from .models import ApplyRequest, NetworkConfigureRequest, NetworkConfigInput, Rule, RuleInput, SettingInput
-from .traffic import discover_flows
+from .monitor import Monitor
+from .models import ApplyRequest, NetworkConfigureRequest, NetworkConfigInput, Rule, RuleInput, SettingInput, VPNAccessInput
 from .network import (
     NetworkError,
     build_apply_plan,
@@ -33,6 +35,7 @@ DATA_DIR = Path(os.getenv("DUALROUTE_DATA_DIR", "./data"))
 STATIC_DIR = Path(__file__).parent / "static"
 store = Store(DATA_DIR / "dualroute.db")
 metrics = MetricsCollector(store)
+monitor = Monitor(store, metrics)
 
 
 async def routing_reconciler() -> None:
@@ -90,6 +93,7 @@ async def routing_reconciler() -> None:
 async def lifespan(_: FastAPI):
     task = asyncio.create_task(metrics.run())
     reconcile_task = asyncio.create_task(routing_reconciler())
+    monitoring_tasks = monitor.tasks()
     store.event("info", "system", "DualRoute démarré")
     try:
         yield
@@ -97,6 +101,9 @@ async def lifespan(_: FastAPI):
         metrics.running = False
         task.cancel()
         reconcile_task.cancel()
+        for monitoring_task in monitoring_tasks:
+            monitoring_task.cancel()
+        await asyncio.gather(*monitoring_tasks, return_exceptions=True)
         try:
             await task
         except asyncio.CancelledError:
@@ -107,12 +114,12 @@ async def lifespan(_: FastAPI):
             pass
 
 
-app = FastAPI(title="DualRoute", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="DualRoute", version="0.4.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
 
 def current_state(include_stats: bool = False) -> dict[str, Any]:
-    interfaces = discover_interfaces()
+    interfaces = deepcopy(monitor.interfaces)
     network_configs = store.network_configs()
     config_by_name = {item["interface"]: item for item in network_configs}
     for interface in interfaces:
@@ -126,11 +133,14 @@ def current_state(include_stats: bool = False) -> dict[str, Any]:
             interface["network"] = str(
                 ipaddress.ip_network(f"{config['address']}/{config['prefix']}", strict=False)
             )
-    apps = discover_apps()
+    apps = public_apps(monitor.apps)
     return {
         "interfaces": interfaces,
         "apps": apps,
-        "app_stats": container_stats(apps) if include_stats else {},
+        "app_stats": monitor.stats,
+        "vpns": monitor.vpns,
+        "discovery": monitor.status,
+        "version": app.version,
         "rules": store.list_rules(),
         "metrics": metrics.latest,
         "settings": store.settings(),
@@ -151,13 +161,12 @@ def snapshot(include_app_stats: bool = False) -> dict[str, Any]:
 
 @app.get("/api/interfaces")
 def interfaces() -> list[dict[str, Any]]:
-    return discover_interfaces()
+    return monitor.interfaces
 
 
 @app.get("/api/apps")
 def apps(include_stats: bool = False) -> dict[str, Any]:
-    items = discover_apps()
-    return {"items": items, "stats": container_stats(items) if include_stats else {}}
+    return {"items": public_apps(monitor.apps), "stats": monitor.stats if include_stats else {}}
 
 
 @app.get("/api/rules", response_model=list[Rule])
@@ -196,7 +205,29 @@ def traffic_history(hours: int = Query(default=1, ge=1, le=24 * 31)) -> list[dic
 
 @app.get("/api/traffic/flows")
 def traffic_flows(limit: int = Query(default=500, ge=1, le=2000)) -> dict[str, Any]:
-    return discover_flows(discover_apps(), limit, discover_interfaces())
+    monitor.flow_requested_at = time.monotonic()
+    result = monitor.flows
+    items = result["items"]
+    # Bound each scope independently: a busy host must not hide the VPN flows.
+    visible = []
+    scopes = {}
+    for item in items:
+        key = item.get("vpn_id") if item.get("scope") == "vpn" else "host"
+        count = scopes.get(key, 0)
+        if count < limit:
+            visible.append(item)
+        scopes[key] = count + 1
+    return {**result, "items": visible, "truncated": len(visible) < len(items)}
+
+
+@app.put("/api/vpns/{vpn_id}/access")
+def vpn_access(vpn_id: str, payload: VPNAccessInput) -> dict[str, Any]:
+    vpn = next((item for item in monitor.apps if item["id"] == vpn_id and item.get("is_vpn")), None)
+    if not vpn:
+        raise HTTPException(404, "VPN introuvable")
+    store.set_setting("secret:vpn:" + vpn["docker_name"], payload.api_key.strip())
+    monitor.vpn_monitor.api_cache.pop(vpn_id, None)
+    return {"configured": bool(payload.api_key.strip())}
 
 
 @app.get("/api/events")

@@ -3,12 +3,15 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 const appState = {
   page: "dashboard",
-  snapshot: { interfaces: [], apps: [], rules: [], metrics: {}, settings: {}, warnings: [] },
+  snapshot: { interfaces: [], apps: [], rules: [], metrics: {}, app_stats: {}, settings: {}, warnings: [], vpns: [], discovery: {} },
   history: [],
   events: [],
   flows: [],
   flowStatus: { available: false, message: "Chargement des connexions…" },
   flowPrevious: {},
+  trafficScope: "host",
+  selectedVpn: "",
+  showLocal: false,
   tableViews: {},
   trafficHours: 1,
   liveTraffic: true,
@@ -83,10 +86,18 @@ function ago(date) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  let response;
+  try {
+    response = await fetch(path, {
     ...options,
+    signal: controller.signal,
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-  });
+    });
+  } catch (error) {
+    throw new Error(error.name === "AbortError" ? "Le serveur ne répond pas après 12 secondes. Nouvelle tentative automatique." : error.message);
+  } finally { clearTimeout(timeout); }
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try { message = (await response.json()).detail || message; } catch (_) {}
@@ -104,7 +115,7 @@ function toast(message, error = false) {
   toast.timer = setTimeout(() => { element.className = "toast"; }, 3500);
 }
 
-function interfaceColor(index) { return index === 0 ? "var(--blue)" : index === 1 ? "var(--teal)" : "#9b7cff"; }
+function interfaceColor(index) { return index === 0 ? "#1683ff" : index === 1 ? "#17d4d0" : "#9b7cff"; }
 function interfaceBadge(name) {
   const index = appState.snapshot.interfaces.findIndex(item => item.name === name);
   return `<span class="badge ${index === 1 ? "teal" : index === 2 ? "purple" : "blue"}">${esc(name || "—")}</span>`;
@@ -158,7 +169,7 @@ function applyTableView(table, state) {
 
 function enhanceTables() {
   $$("table.data-table").forEach((table, tableIndex) => {
-    const id = `${appState.page}-${tableIndex}`;
+    const id = table.dataset.tableKey || `${appState.page}-${tableIndex}`;
     table.dataset.tableId = id;
     table.closest(".table-scroll").dataset.scrollId = id;
     const headers = [...table.tHead.rows[0].cells];
@@ -234,23 +245,30 @@ async function refreshSnapshot(forceRender = false) {
   appState.refreshing = true;
   try {
     appState.snapshotPolls += 1;
-    const includeAppStats = forceRender || appState.snapshotPolls % 4 === 0;
-    const previousStats = appState.snapshot.app_stats || {};
-    const nextSnapshot = await api(`/api/snapshot?include_app_stats=${includeAppStats}`);
-    if (!includeAppStats) nextSnapshot.app_stats = previousStats;
+    const nextSnapshot = await api("/api/snapshot");
     appState.snapshot = nextSnapshot;
     const managedCount = managedInterfaces().length;
     const otherCount = appState.snapshot.interfaces.length - managedCount;
-    $("#side-count").textContent = `${appState.snapshot.apps.length} applications • ${managedCount} gérées${otherCount ? ` • ${otherCount} autres` : ""}`;
+    $("#side-count").textContent = !nextSnapshot.discovery?.interfaces ? "Collecte initiale des interfaces…" : `${appState.snapshot.apps.length} applications • ${managedCount} gérées${otherCount ? ` • ${otherCount} autres` : ""}`;
+    $("#side-version").textContent = `v${nextSnapshot.version || "0.4.0"}`;
+    const issues = Object.values(nextSnapshot.discovery || {}).filter(source => source.state === "error");
+    const healthTitle = $(".system-health b");
+    healthTitle.textContent = issues.length ? "Collecte partielle" : "Système opérationnel";
+    healthTitle.style.color = issues.length ? "var(--amber)" : "var(--green)";
     $("#last-update").textContent = `Actualisé à ${new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
     if (appState.page === "traffic" && appState.liveTraffic) {
-      await Promise.all([refreshFlows(), ensureHistory(appState.trafficHours)]);
+      const results = await Promise.allSettled([refreshFlows(), ensureHistory(appState.trafficHours)]);
+      results.forEach(result => { if (result.status === "rejected") toast(result.reason.message, true); });
     }
     const activeEditor = document.activeElement?.matches("input, select, textarea");
     const livePage = appState.page === "dashboard" || (appState.page === "traffic" && appState.liveTraffic);
     if (forceRender || (livePage && !$("#rule-dialog").open && !activeEditor && !appState.resizingTable)) renderPage(true);
   } catch (error) {
     $("#last-update").textContent = "API indisponible";
+    $("#side-count").textContent = "Connexion interrompue • nouvelle tentative automatique";
+    $(".system-health b").textContent = "Serveur indisponible";
+    $(".system-health b").style.color = "var(--red)";
+    if (!$("#content").childElementCount) renderPage();
     toast(error.message, true);
   } finally {
     appState.refreshing = false;
@@ -262,30 +280,37 @@ async function refreshSnapshot(forceRender = false) {
 }
 
 async function ensureHistory(hours = 1, force = false) {
-  if (!force && Date.now() - appState.lastHistoryFetch < 9000) return;
+  if (!force && Date.now() - appState.lastHistoryFetch < 60000) return;
   appState.history = await api(`/api/traffic/history?hours=${hours}`);
   appState.lastHistoryFetch = Date.now();
 }
 
 async function refreshFlows() {
   const result = await api("/api/traffic/flows?limit=1000");
-  const now = Date.now();
-  const previous = appState.flowPrevious;
-  const next = {};
-  appState.flows = result.items.map(flow => {
-    const old = previous[flow.id];
-    const elapsed = old ? Math.max((now - old.ts) / 1000, 0.001) : 0;
-    const measured = flow.accounting && old?.accounting && elapsed;
-    const rxBps = measured ? Math.max(0, flow.rx_bytes - old.rx_bytes) * 8 / elapsed : null;
-    const txBps = measured ? Math.max(0, flow.tx_bytes - old.tx_bytes) * 8 / elapsed : null;
-    next[flow.id] = { ts: now, rx_bytes: flow.rx_bytes, tx_bytes: flow.tx_bytes, accounting: flow.accounting };
-    return { ...flow, rx_bps: rxBps, tx_bps: txBps };
-  });
-  appState.flowPrevious = next;
+  appState.flows = result.items || [];
   appState.flowStatus = result;
 }
 
-function flowRate(value) { return value === null ? "—" : formatRate(value); }
+function flowRate(value, status = "missing") {
+  return value == null ? `<span class="muted" title="${status === "warming" ? "Première mesure : débit disponible au prochain relevé" : "Connexion créée sans compteurs, attendre son renouvellement"}">${status === "warming" ? "Mesure…" : "Sans compteur"}</span>` : formatRate(value);
+}
+
+function chartLegend(interfaces) {
+  return `<div class="legend chart-legend">${interfaces.map((item, index) => `<span style="--legend:${interfaceColor(index)}">${esc(item.label || item.name)}</span>`).join("")}<small>━ Reçu &nbsp; ┄ Envoyé</small></div>`;
+}
+
+function vpnCards() {
+  const vpns = appState.snapshot.vpns || [];
+  if (!vpns.length) return "";
+  const labels = { connected: "Connecté", reconnecting: "Reconnexion", connecting: "Connexion", stopped: "Arrêté", unknown: "Indéterminé" };
+  return `<section class="vpn-section"><div class="toolbar"><div><h2>VPN des conteneurs</h2><p>Tunnels Gluetun • observation séparée des interfaces du NAS</p></div><span class="badge purple">${vpns.length} VPN détectés</span></div><div class="vpn-cards">${vpns.map(vpn => `<article class="vpn-card"><div class="vpn-head"><span class="vpn-icon">◈</span><div><h3>${esc(vpn.name)}</h3><small>${esc(vpn.provider)} · ${esc(vpn.type)}</small></div><span class="badge ${vpn.status === "connected" ? "green" : vpn.status === "stopped" ? "red" : "amber"}">${labels[vpn.status] || "Indéterminé"}</span></div><div class="vpn-stats"><div><small>Reçu dans le tunnel</small><b>${flowRate(vpn.metric.rx_bps, vpn.observable ? "warming" : "missing")}</b></div><div><small>Envoyé dans le tunnel</small><b>${flowRate(vpn.metric.tx_bps, vpn.observable ? "warming" : "missing")}</b></div><div><small>IP publique VPN</small><b>${esc(vpn.public_ip || "Non disponible")}</b></div></div><p class="vpn-detail">Docker : ${esc(vpn.container_status)} · Santé : ${esc(vpn.health)} · Tunnel : ${esc(vpn.interfaces.join(", ") || "Non observable")}</p><p class="vpn-detail">${vpn.apps.length ? vpn.apps.map(app => esc(app.name)).join(" · ") : "Aucune application liée détectée"}</p><div class="vpn-footer"><small>${esc(vpn.api_message)}</small><button class="chip-button" data-vpn-detail="${esc(vpn.id)}">Voir le trafic →</button></div></article>`).join("")}</div><p class="traffic-note">Les débits des tunnels ne sont pas ajoutés aux interfaces physiques : un même transfert peut être observé aux deux niveaux.</p></section>`;
+}
+
+function bindVpnLinks() {
+  $$('[data-vpn-detail]').forEach(button => button.onclick = () => {
+    appState.trafficScope = "vpn"; appState.selectedVpn = button.dataset.vpnDetail; setPage("traffic");
+  });
+}
 
 function interfaceCard(item, index) {
   const metric = appState.snapshot.metrics[item.name] || {};
@@ -322,13 +347,15 @@ function renderDashboard() {
   }).join("");
   $("#content").innerHTML = `
     ${warnings.length ? `<div class="recommendation warning"><h3>Configuration à compléter</h3><p>${warnings.map(esc).join(" ")}</p></div>` : ""}
-    <div class="cards">${cards || `<div class="recommendation warning"><h3>Aucune interface détectée</h3><p>La découverte réseau nécessite le conteneur en mode réseau hôte.</p></div>`}</div>
-    <section class="panel"><div class="panel-head"><div><h2>Trafic en temps réel</h2><p>Débits descendants et montants par interface • ${appState.snapshot.settings.display_rate_unit === "MBps" ? "Mo/s" : "Mb/s"}</p></div><div class="legend">${interfaces.map((item, index) => `<span style="--legend:${interfaceColor(index)}">${esc(item.name)}</span>`).join("")}</div></div><div class="chart-wrap"><canvas id="traffic-chart"></canvas></div></section>
+    <div class="cards">${cards || `<div class="recommendation warning"><h3>${appState.snapshot.discovery?.interfaces ? "Aucune interface détectée" : "Première collecte en cours"}</h3><p>${appState.snapshot.discovery?.interfaces ? "Vérifiez le mode réseau hôte et le diagnostic de collecte. Les autres sources continuent de fonctionner." : "Les interfaces s’afficheront dès leur découverte, indépendamment des statistiques Docker."}</p></div>`}</div>
+    ${vpnCards()}
+    <section class="panel"><div class="panel-head"><div><h2>Historique des interfaces</h2><p>Moyennes conservées toutes les ${appState.snapshot.settings.history_interval_seconds || 60} s • ${appState.snapshot.settings.display_rate_unit === "MBps" ? "Mo/s" : "Mb/s"}</p></div>${chartLegend(interfaces)}</div><div class="chart-wrap"><canvas id="traffic-chart"></canvas></div></section>
     <section class="panel"><div class="panel-head"><div><h2>Applications</h2><p>Activité et règle actuellement associée</p></div><button class="secondary" data-page-link="rules">Gérer les règles</button></div>
       <div class="table-scroll"><table class="data-table"><thead><tr><th style="width:24%">Application</th><th style="width:24%">Mode</th><th>Interface</th><th>Reçu</th><th>Envoyé</th><th>Statut</th></tr></thead><tbody>${rows || tableEmpty(6, "Aucune application détectée")}</tbody></table></div>
       <div class="table-footer"><span>${apps.length} applications détectées</span><span>Actualisation toutes les ${appState.snapshot.settings.sample_interval_seconds || 2} s</span></div>
     </section>`;
   bindPageLinks();
+  bindVpnLinks();
   ensureHistory(1).then(() => drawTrafficChart($("#traffic-chart"))).catch(error => toast(error.message, true));
 }
 
@@ -380,22 +407,33 @@ function renderRules() {
 }
 
 function renderTraffic() {
-  const interfaces = managedInterfaces();
-  const totalRx = interfaces.reduce((sum, item) => sum + Number((appState.snapshot.metrics[item.name] || {}).rx_bps || 0), 0);
-  const totalTx = interfaces.reduce((sum, item) => sum + Number((appState.snapshot.metrics[item.name] || {}).tx_bps || 0), 0);
+  const vpns = appState.snapshot.vpns || [];
+  if (!vpns.length) appState.trafficScope = "host";
+  const vpnScope = appState.trafficScope === "vpn";
+  const vpn = vpns.find(item => item.id === appState.selectedVpn) || vpns[0];
+  appState.selectedVpn = vpn?.id || "";
+  const interfaces = vpnScope ? [{name: vpn.history_key, label: vpn.name}] : managedInterfaces();
+  const metricFor = item => vpnScope ? vpn.metric : appState.snapshot.metrics[item.name] || {};
+  const totalRx = interfaces.reduce((sum, item) => sum + Number(metricFor(item).rx_bps || 0), 0);
+  const totalTx = interfaces.reduce((sum, item) => sum + Number(metricFor(item).tx_bps || 0), 0);
+  const scoped = appState.flows.filter(flow => vpnScope ? flow.scope === "vpn" && flow.vpn_id === vpn.id : flow.scope !== "vpn");
+  const localCount = scoped.filter(flow => flow.local_only).length;
+  const flows = scoped.filter(flow => appState.showLocal || !flow.local_only);
+  const source = vpnScope ? appState.flowStatus.vpn_status?.[vpn.id] || {available: false, message: "Collecte du VPN en cours…"} : appState.flowStatus;
   const groups = new Map();
-  appState.flows.forEach(flow => {
+  flows.forEach(flow => {
     const group = groups.get(flow.app_id) || {
       app_id: flow.app_id, application: flow.application, container_id: flow.container_id,
       app_type: flow.app_type, connections: 0, interfaces: new Set(), rx_bps: 0, tx_bps: 0,
-      rx_bytes: 0, tx_bytes: 0, measured: true, accounting: true,
+      rx_bytes: 0, tx_bytes: 0, measured: false, accounting: false, missing: 0,
     };
     group.connections += 1;
-    group.measured = group.measured && flow.rx_bps !== null;
-    group.accounting = group.accounting && flow.accounting;
-    group.interfaces.add(flow.interface || "Route système");
-    group.rx_bps += flow.rx_bps;
-    group.tx_bps += flow.tx_bps;
+    group.measured ||= flow.rx_bps != null;
+    group.accounting ||= flow.accounting;
+    group.missing += flow.rx_bps == null ? 1 : 0;
+    group.interfaces.add(vpnScope ? vpn.name : flow.interface || "Non identifiée");
+    group.rx_bps += flow.rx_bps || 0;
+    group.tx_bps += flow.tx_bps || 0;
     group.rx_bytes += flow.rx_bytes;
     group.tx_bytes += flow.tx_bytes;
     groups.set(flow.app_id, group);
@@ -405,49 +443,58 @@ function renderTraffic() {
     return `<tr>
       <td><div class="app-cell"><span class="app-icon">${group.app_type === "docker" ? "◇" : group.app_type === "system" ? "▣" : "⌂"}</span><span>${esc(group.application)}${group.container_id ? `<small>${esc(group.container_id)}</small>` : ""}</span></div></td>
       <td data-sort="${group.connections}">${group.connections}</td>
-      <td>${[...group.interfaces].map(interfaceBadge).join(" ")}</td>
+      <td>${vpnScope ? `<span class="badge purple">${esc(vpn.name)}</span>` : [...group.interfaces].map(interfaceBadge).join(" ")}</td>
       <td>${rule ? esc(strategyLabels[rule.strategy]) : "Route système"}</td>
-      <td data-sort="${group.measured ? group.rx_bps : -1}">${group.measured ? formatRate(group.rx_bps) : "—"}</td>
-      <td data-sort="${group.measured ? group.tx_bps : -1}">${group.measured ? formatRate(group.tx_bps) : "—"}</td>
-      <td data-sort="${group.accounting ? group.rx_bytes : -1}">${group.accounting ? formatBytes(group.rx_bytes) : "—"}</td>
-      <td data-sort="${group.accounting ? group.tx_bytes : -1}">${group.accounting ? formatBytes(group.tx_bytes) : "—"}</td>
+      <td data-sort="${group.measured ? group.rx_bps : -1}" title="${group.missing} connexion(s) sans débit mesurable">${group.measured ? formatRate(group.rx_bps) + (group.missing ? " *" : "") : "Mesure indisponible"}</td>
+      <td data-sort="${group.measured ? group.tx_bps : -1}">${group.measured ? formatRate(group.tx_bps) + (group.missing ? " *" : "") : "Mesure indisponible"}</td>
+      <td data-sort="${group.accounting ? group.rx_bytes : -1}">${group.accounting ? formatBytes(group.rx_bytes) : "Sans compteur"}</td>
+      <td data-sort="${group.accounting ? group.tx_bytes : -1}">${group.accounting ? formatBytes(group.tx_bytes) : "Sans compteur"}</td>
     </tr>`;
   }).join("");
-  const connectionRows = appState.flows.map(flow => `<tr>
-    <td><div class="app-cell"><span class="app-icon">${flow.app_type === "docker" ? "◇" : flow.app_type === "system" ? "▣" : "⌂"}</span><span>${esc(flow.application)}${flow.container_id ? `<small>${esc(flow.container_id)}</small>` : ""}</span></div></td>
+  const connectionRows = flows.map(flow => `<tr>
+    <td title="${esc(flow.attribution || 'Attribution non disponible')}"><div class="app-cell"><span class="app-icon">${flow.app_type === "docker" ? "◇" : flow.app_type === "system" ? "▣" : "⌂"}</span><span>${esc(flow.application)}${flow.container_id ? `<small>${esc(flow.container_id)}</small>` : ""}</span></div></td>
+    <td>${esc(flow.process || "Non résolu")}${flow.pid ? `<small class="process-pid">PID ${flow.pid}</small>` : ""}</td>
     <td><span class="badge ${flow.direction === "entrant" ? "teal" : "blue"}">${esc(flow.direction)}</span></td>
     <td>${esc(flow.protocol)}</td><td>${esc(flow.state)}</td>
     <td title="${esc(flow.local_endpoint)}">${esc(flow.local_endpoint)}</td>
     <td title="${esc(flow.remote_endpoint)}">${esc(flow.remote_endpoint)}</td>
     <td>${esc(flow.service)}</td>
-    <td title="${esc(flow.interface_source || 'Interface non identifiée')}">${flow.interface ? interfaceBadge(flow.interface) : `<span class="muted">Non identifiée</span>`}</td>
-    <td data-sort="${flow.rx_bps ?? -1}">${flowRate(flow.rx_bps)}</td>
-    <td data-sort="${flow.tx_bps ?? -1}">${flowRate(flow.tx_bps)}</td>
-    <td data-sort="${flow.accounting ? flow.rx_bytes + flow.tx_bytes : -1}">${flow.accounting ? formatBytes(flow.rx_bytes + flow.tx_bytes) : "—"}</td>
+    <td title="${esc(flow.interface_source || 'Interface non identifiée')}">${vpnScope ? `<span class="badge purple">${esc(vpn.name)}</span>` : flow.interface ? interfaceBadge(flow.interface) : `<span class="muted">Non identifiée</span>`}</td>
+    <td data-sort="${flow.rx_bps ?? -1}">${flowRate(flow.rx_bps, flow.rate_status)}</td>
+    <td data-sort="${flow.tx_bps ?? -1}">${flowRate(flow.tx_bps, flow.rate_status)}</td>
+    <td data-sort="${flow.accounting ? flow.rx_bytes + flow.tx_bytes : -1}">${flow.accounting ? formatBytes(flow.rx_bytes + flow.tx_bytes) : "Sans compteur"}</td>
     <td data-sort="${flow.timeout_seconds}">${flow.timeout_seconds} s</td>
   </tr>`).join("");
   const managedNames = new Set(interfaces.map(item => item.name));
   const recent = appState.history.filter(sample => managedNames.has(sample.interface)).slice(-240).reverse();
-  const rows = recent.map(sample => `<tr><td data-sort="${new Date(sample.ts).getTime()}">${new Date(sample.ts).toLocaleTimeString("fr-FR")}</td><td>${interfaceBadge(sample.interface)}</td><td>Entrant</td><td data-sort="${sample.rx_bps}">${formatRate(sample.rx_bps)}</td><td>Sortant</td><td data-sort="${sample.tx_bps}">${formatRate(sample.tx_bps)}</td><td data-sort="${sample.rx_bytes}">${formatBytes(sample.rx_bytes)}</td><td data-sort="${sample.tx_bytes}">${formatBytes(sample.tx_bytes)}</td></tr>`).join("");
-  $("#content").innerHTML = `<div class="kpi-grid">
-    <div class="kpi" style="--accent:var(--teal)"><span class="kpi-icon">▥</span><div><small>Débit total</small><b>${formatRate(totalRx + totalTx)}</b></div></div>
-    ${interfaces.map((item,index) => `<div class="kpi" style="--accent:${interfaceColor(index)}"><span class="kpi-icon">↔</span><div><small>${esc(item.name.toUpperCase())}</small><b>${formatRate(((appState.snapshot.metrics[item.name] || {}).rx_bps || 0) + ((appState.snapshot.metrics[item.name] || {}).tx_bps || 0))}</b></div></div>`).join("")}
-    <div class="kpi" style="--accent:var(--green)"><span class="kpi-icon">◎</span><div><small>Connexions actives</small><b>${appState.flows.length}</b></div></div>
+  const rows = recent.map(sample => `<tr><td data-sort="${new Date(sample.ts).getTime()}">${new Date(sample.ts).toLocaleString("fr-FR", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"})}</td><td>${interfaceBadge(vpnScope ? vpn.name : sample.interface)}</td><td>Entrant</td><td data-sort="${sample.rx_bps}">${formatRate(sample.rx_bps)}</td><td>Sortant</td><td data-sort="${sample.tx_bps}">${formatRate(sample.tx_bps)}</td><td data-sort="${sample.rx_bytes}">${formatBytes(sample.rx_bytes)}</td><td data-sort="${sample.tx_bytes}">${formatBytes(sample.tx_bytes)}</td></tr>`).join("");
+  $("#content").innerHTML = `${vpns.length ? `<div class="traffic-tabs"><button class="chip-button ${!vpnScope ? "active" : ""}" data-traffic-scope="host">Interfaces du NAS</button><button class="chip-button ${vpnScope ? "active" : ""}" data-traffic-scope="vpn">VPN des conteneurs</button>${vpnScope ? `<label>VPN<select id="traffic-vpn">${vpns.map(item => `<option value="${esc(item.id)}" ${item.id === vpn.id ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></label>` : ""}</div>` : ""}
+  ${vpnScope ? `<p class="traffic-note">Connexions de l’espace réseau de ${esc(vpn.name)}, y compris LAN et supervision. Le débit du tunnel est mesuré sur ${esc(vpn.interfaces.join(", ") || "une interface non observable")}. Les connexions externes chiffrées restent dans l’onglet Interfaces du NAS.</p>` : ""}
+  <div class="kpi-grid">
+    <div class="kpi" style="--accent:var(--teal)"><span class="kpi-icon">▥</span><div><small>${vpnScope ? "Débit du tunnel" : "Débit des interfaces gérées"}</small><b>${vpnScope && vpn.metric.rx_bps == null ? "Mesure indisponible" : formatRate(totalRx + totalTx)}</b></div></div>
+    ${vpnScope ? `<div class="kpi" style="--accent:#9b7cff"><span class="kpi-icon">◈</span><div><small>${esc(vpn.name)}</small><b>${({connected:"Connecté",connecting:"Connexion",reconnecting:"Reconnexion",stopped:"Arrêté",unknown:"Indéterminé"})[vpn.status] || "Indéterminé"}</b></div></div><div class="kpi" style="--accent:#9b7cff"><span class="kpi-icon">◎</span><div><small>IP publique VPN</small><b>${esc(vpn.public_ip || "Non disponible")}</b></div></div>` : interfaces.map((item,index) => `<div class="kpi" style="--accent:${interfaceColor(index)}"><span class="kpi-icon">↔</span><div><small>${esc(item.label || item.name.toUpperCase())}</small><b>${formatRate((metricFor(item).rx_bps || 0) + (metricFor(item).tx_bps || 0))}</b></div></div>`).join("")}
+    <div class="kpi" style="--accent:var(--green)"><span class="kpi-icon">◎</span><div><small>Connexions affichées</small><b>${flows.length}</b></div></div>
   </div>
-  <div class="traffic-status ${appState.flowStatus.available ? "" : "warning"}"><span>${esc(appState.flowStatus.message)}</span><button class="chip-button ${appState.liveTraffic ? "active" : ""}" id="toggle-live">${appState.liveTraffic ? "● Actualisation automatique" : "Ⅱ Actualisation en pause"}</button></div>
-  ${appState.flowStatus.available && !appState.flowStatus.accounting_enabled ? `<div class="recommendation warning"><h3>Activer les débits par connexion</h3><p>Les compteurs Linux sont désactivés. Depuis SSH sur le NAS, exécutez <code>sudo sysctl -w net.netfilter.nf_conntrack_acct=1</code>. Les compteurs seront disponibles sur les nouvelles connexions. Les valeurs absentes sont affichées « — ».</p></div>` : ""}
-  ${appState.flowStatus.accounting_enabled && appState.flowStatus.accounting_missing ? `<p class="traffic-note">${appState.flowStatus.accounting_missing} connexions créées sans compteurs : débit indisponible jusqu’à leur renouvellement.</p>` : ""}
+  <div class="traffic-status ${source.available ? "" : "warning"}"><span>${esc(source.message)} ${appState.flowStatus.collected_at ? `Dernière collecte ${ago(appState.flowStatus.collected_at)}.` : ""}</span><button class="chip-button ${appState.liveTraffic ? "active" : ""}" id="toggle-live">${appState.liveTraffic ? "● Actualisation toutes les 5 s" : "Ⅱ Actualisation en pause"}</button></div>
+  <div class="traffic-options"><label><input id="show-local-flows" type="checkbox" ${appState.showLocal ? "checked" : ""}>Afficher les connexions locales (${localCount})</label><span>* Débit partiel si certaines connexions n’ont pas de mesure. Les connexions terminées entre deux relevés peuvent échapper au suivi.</span></div>
+  ${appState.flowStatus.host_processes_visible === false ? `<div class="recommendation warning"><h3>Attribution aux processus limitée</h3><p>Recréez DualRoute avec le Compose v0.4 : montage /proc:/host/proc:ro et capacité SYS_PTRACE. Les adresses Docker et ports publiés restent utilisables.</p></div>` : ""}
+  ${appState.flowStatus.process_permission_errors ? `<p class="traffic-note">${appState.flowStatus.process_permission_errors} lectures de processus refusées. Certains flux restent non résolus ; vérifiez SYS_PTRACE et les restrictions du NAS.</p>` : ""}
+  ${source.available && !source.accounting_enabled ? `<p class="traffic-note">L’activation automatique des compteurs n’a pas abouti dans cet espace réseau. Vérifiez NET_ADMIN${vpnScope ? " et SYS_ADMIN" : ""}. Les anciennes connexions restent sans compteurs jusqu’à leur renouvellement.</p>` : ""}
+  ${source.accounting_missing ? `<p class="traffic-note">${source.accounting_missing} connexions créées sans compteurs : débit indisponible jusqu’à leur renouvellement.</p>` : ""}
   ${appState.flowStatus.truncated ? `<p class="traffic-note">Affichage limité à ${appState.flows.length} connexions sur ${appState.flowStatus.total}. Les synthèses portent sur les flux affichés.</p>` : ""}
   <section class="panel"><div class="panel-head"><div><h2>Trafic actuel par application</h2><p>Débits des connexions suivies • volumes cumulés des connexions encore présentes</p></div><span class="muted">Cliquez sur une colonne pour trier • filtres sous les titres</span></div><div class="table-scroll"><table class="data-table"><thead><tr><th style="width:22%">Application / conteneur</th><th>Connexions</th><th>Interface actuelle</th><th>Règle</th><th>Reçu/s</th><th>Envoyé/s</th><th>Total reçu</th><th>Total envoyé</th></tr></thead><tbody>${appRows || tableEmpty(8, appState.flowStatus.available ? "Aucune connexion active attribuable" : appState.flowStatus.message)}</tbody></table></div></section>
-  <section class="panel"><div class="panel-head"><div><h2>Connexions actives</h2><p>Application, endpoints, protocole et route de chaque flux IPv4 suivi par conntrack</p></div><span class="muted">${appState.flows.length} flux</span></div><div class="table-scroll tall"><table class="data-table wide"><thead><tr><th style="width:210px">Application / conteneur</th><th>Sens</th><th>Protocole</th><th>État</th><th style="width:155px">Endpoint local</th><th style="width:175px">Destination / client</th><th>Service</th><th>Interface</th><th>Reçu/s</th><th>Envoyé/s</th><th>Volume</th><th>Expiration</th></tr></thead><tbody>${connectionRows || tableEmpty(12, appState.flowStatus.available ? "Aucune connexion active" : appState.flowStatus.message)}</tbody></table></div></section>
-  <section class="panel"><div class="panel-head"><div><h2>Historique par interface</h2><p>Trafic reçu et envoyé pour chaque interface gérée</p></div><div class="filters"><button class="chip-button ${appState.trafficHours === 1 ? "active" : ""}" data-hours="1">1 h</button><button class="chip-button ${appState.trafficHours === 24 ? "active" : ""}" data-hours="24">24 h</button><button class="chip-button ${appState.trafficHours === 168 ? "active" : ""}" data-hours="168">7 j</button></div></div><div class="chart-wrap large"><canvas id="traffic-chart"></canvas></div></section>
-  <section class="panel"><div class="panel-head"><div><h2>Échantillons historiques</h2><p>Valeurs conservées pour l’analyse par interface</p></div><span class="muted">Réception ${formatRate(totalRx)} • Envoi ${formatRate(totalTx)}</span></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Heure</th><th>Interface</th><th>Sens</th><th>Débit</th><th>Sens</th><th>Débit</th><th>Total reçu</th><th>Total envoyé</th></tr></thead><tbody>${rows || tableEmpty(8, "Collecte des premières mesures…")}</tbody></table></div></section>`;
+  <section class="panel"><div class="panel-head"><div><h2>Connexions actives</h2><p>Application, processus, endpoints et route de chaque flux IPv4 suivi</p></div><span class="muted">${flows.length} flux</span></div><div class="table-scroll tall"><table class="data-table wide" data-table-key="traffic-${vpnScope ? "vpn" : "host"}-connections"><thead><tr><th style="width:240px">Application / conteneur</th><th style="width:160px">Processus</th><th>Sens</th><th>Protocole</th><th>État</th><th style="width:155px">Endpoint local</th><th style="width:175px">Destination / client</th><th>Service</th><th>Interface / tunnel</th><th>Reçu/s</th><th>Envoyé/s</th><th>Volume</th><th>Expiration</th></tr></thead><tbody>${connectionRows || tableEmpty(13, source.available ? "Aucune connexion active dans cette sélection" : source.message)}</tbody></table></div></section>
+  <section class="panel"><div class="panel-head"><div><h2>${vpnScope ? "Historique du tunnel VPN" : "Historique par interface"}</h2><p>Reçu : ligne continue • envoyé : ligne pointillée • moyennes par période</p></div><div class="filters"><button class="chip-button ${appState.trafficHours === 1 ? "active" : ""}" data-hours="1">1 h</button><button class="chip-button ${appState.trafficHours === 24 ? "active" : ""}" data-hours="24">24 h</button><button class="chip-button ${appState.trafficHours === 168 ? "active" : ""}" data-hours="168">7 j</button></div></div>${chartLegend(interfaces)}<div class="chart-wrap large"><canvas id="traffic-chart"></canvas></div></section>
+  <section class="panel"><div class="panel-head"><div><h2>Échantillons historiques</h2><p>Un relevé toutes les ${appState.snapshot.settings.history_interval_seconds || 60} s par interface ou VPN • périodes regroupées pour les longues durées • ${recent.length} dernières lignes</p></div><span class="muted">Réception ${formatRate(totalRx)} • Envoi ${formatRate(totalTx)}</span></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Heure</th><th>Interface</th><th>Sens</th><th>Débit</th><th>Sens</th><th>Débit</th><th>Total reçu</th><th>Total envoyé</th></tr></thead><tbody>${rows || tableEmpty(8, "Première moyenne disponible après une minute de collecte")}</tbody></table></div></section>`;
   drawTrafficChart($("#traffic-chart"));
   $("#toggle-live").onclick = async () => {
     appState.liveTraffic = !appState.liveTraffic;
     if (appState.liveTraffic) await refreshSnapshot(true);
     else renderPage(true);
   };
+  $("#show-local-flows").onchange = event => { appState.showLocal = event.target.checked; renderPage(true); };
+  $$('[data-traffic-scope]').forEach(button => button.onclick = () => { appState.trafficScope = button.dataset.trafficScope; renderPage(true); });
+  if ($("#traffic-vpn")) $("#traffic-vpn").onchange = event => { appState.selectedVpn = event.target.value; renderPage(true); };
   $$('[data-hours]').forEach(button => button.onclick = async () => {
     appState.trafficHours = Number(button.dataset.hours);
     await ensureHistory(appState.trafficHours, true);
@@ -484,6 +531,8 @@ function renderNetwork() {
   $("#rediscover").onclick = () => refreshSnapshot(true);
   $("#test-network").onclick = () => testNetwork(false);
   $("#network-form").onsubmit = event => { event.preventDefault(); testNetwork(true); };
+  $("#content").insertAdjacentHTML("beforeend", vpnCards());
+  bindVpnLinks();
 }
 
 function renderEvents() {
@@ -496,11 +545,22 @@ function renderSettings() {
   const settings = appState.snapshot.settings;
   $("#content").innerHTML = `<div class="settings-grid"><section class="setting-card"><h3>Application des règles</h3><p>Le mode actif autorise DualRoute à modifier nftables et les tables de routage Linux. Commencez par une prévisualisation.</p><label class="toggle-row"><span><b>Mode actif</b><small>${settings.enforcement_enabled ? "Les règles peuvent être appliquées" : "Prévisualisation uniquement"}</small></span><input id="enforcement" type="checkbox" ${settings.enforcement_enabled ? "checked" : ""}></label><div class="form-actions" style="margin-top:14px"><button class="secondary" id="preview-settings">Prévisualiser</button><button class="primary" id="apply-settings">Appliquer les règles</button></div></section>
     <section class="setting-card"><h3>Affichage du trafic</h3><p>Choisissez l’unité utilisée pour tous les débits. 8 Mb/s correspondent à 1 Mo/s.</p><div class="form-grid"><label>Unité des débits<select id="display-rate-unit"><option value="mbps" ${settings.display_rate_unit !== "MBps" ? "selected" : ""}>Mb/s — mégabits par seconde</option><option value="MBps" ${settings.display_rate_unit === "MBps" ? "selected" : ""}>Mo/s — mégaoctets par seconde</option></select></label><label class="toggle-row compact"><span><b>Tableau de bord limité aux interfaces gérées</b><small>Afficher uniquement ETH0, ETH1 et Tailscale</small></span><input id="dashboard-managed-only" type="checkbox" ${settings.dashboard_managed_only !== false ? "checked" : ""}></label></div></section>
-    <section class="setting-card"><h3>Conservation des mesures</h3><p>Le volume SQLite augmente avec la fréquence et la durée de conservation.</p><div class="form-grid"><label>Intervalle (secondes)<input id="sample-interval" type="number" min="1" max="60" value="${settings.sample_interval_seconds || 2}"></label><label>Conservation (jours)<input id="retention-days" type="number" min="1" max="365" value="${settings.retention_days || 30}"></label></div><button class="primary" id="save-settings" style="margin-top:14px">Enregistrer tous les paramètres</button></section>
+    <section class="setting-card"><h3>Conservation des mesures</h3><p>Les débits en direct restent en mémoire. Seules les moyennes des interfaces gérées et des VPN sont enregistrées, une fois par minute par défaut.</p><div class="form-grid"><label>Mesures en mémoire (secondes)<input id="sample-interval" type="number" min="2" max="60" value="${settings.sample_interval_seconds || 5}"></label><label>Historique sur disque (secondes)<input id="history-interval" type="number" min="30" max="3600" value="${settings.history_interval_seconds || 60}"></label><label>Conservation (jours)<input id="retention-days" type="number" min="1" max="365" value="${settings.retention_days || 30}"></label></div><button class="primary" id="save-settings" style="margin-top:14px">Enregistrer tous les paramètres</button></section>
+    ${(appState.snapshot.vpns || []).map(vpn => `<section class="setting-card"><h3>Surveillance VPN · ${esc(vpn.name)}</h3><p>L’état Docker et le débit du tunnel sont lus localement. La clé API donne accès au statut interne et à l’IP publique. Autorisez uniquement GET /v1/vpn/status et GET /v1/publicip/ip dans Gluetun.</p><label>Clé API Gluetun<input type="password" autocomplete="new-password" data-vpn-key="${esc(vpn.id)}" placeholder="${vpn.api_key_configured ? "Clé configurée (jamais affichée)" : "Clé facultative"}"></label><p>${esc(vpn.api_message)}</p><div class="form-actions"><button class="primary" data-save-vpn="${esc(vpn.id)}">Enregistrer la clé</button><button class="secondary" data-clear-vpn="${esc(vpn.id)}">Effacer la clé enregistrée</button></div></section>`).join("")}
     <section class="setting-card" style="grid-column:1/-1"><h3>Prévisualisation technique</h3><p>Cette zone affiche les commandes et la table nftables générées sans modifier le NAS.</p><pre id="routing-preview" class="code-preview">Cliquez sur Prévisualiser pour générer le plan.</pre></section></div>`;
   $("#save-settings").onclick = saveSettings;
   $("#preview-settings").onclick = previewRouting;
   $("#apply-settings").onclick = applyRouting;
+  $$('[data-save-vpn], [data-clear-vpn]').forEach(button => button.onclick = async () => {
+    const id = button.dataset.saveVpn || button.dataset.clearVpn;
+    const input = $(`[data-vpn-key="${id}"]`);
+    if (button.dataset.saveVpn && !input.value.trim()) { toast("Saisissez une clé à enregistrer", true); return; }
+    try {
+      await api(`/api/vpns/${encodeURIComponent(id)}/access`, {method:"PUT", body:JSON.stringify({api_key:button.dataset.clearVpn ? "" : input.value})});
+      input.value = ""; input.placeholder = button.dataset.clearVpn ? "Clé facultative" : "Clé configurée (jamais affichée)";
+      toast("Accès de surveillance mis à jour");
+    } catch (error) { toast(error.message, true); }
+  });
 }
 
 function renderPage(preserveScroll = false) {
@@ -511,6 +571,8 @@ function renderPage(preserveScroll = false) {
   $$("#nav button").forEach(button => button.classList.toggle("active", button.dataset.page === appState.page));
   const renderers = { dashboard: renderDashboard, apps: renderApps, rules: renderRules, traffic: renderTraffic, network: renderNetwork, events: renderEvents, settings: renderSettings };
   renderers[appState.page]();
+  const errors = Object.entries(appState.snapshot.discovery || {}).filter(([, source]) => source.state === "error");
+  if (errors.length) $("#content").insertAdjacentHTML("afterbegin", `<div class="recommendation warning"><h3>Collecte partielle</h3><p>${errors.map(([name, source]) => `${esc(name)} : ${esc(source.message)}`).join(" • ")}. Les dernières données disponibles restent affichées.</p></div>`);
   enhanceTables();
   restoreScrollState(scrollState);
 }
@@ -526,8 +588,12 @@ function drawTrafficChart(canvas) {
   const width = rect.width; const height = rect.height;
   const pad = { left: 48, right: 12, top: 12, bottom: 25 };
   const innerW = width - pad.left - pad.right; const innerH = height - pad.top - pad.bottom;
-  const interfaces = appState.page === "dashboard" ? dashboardInterfaces() : managedInterfaces();
-  const series = interfaces.map(item => appState.history.filter(row => row.interface === item.name).slice(-240));
+  const vpn = appState.snapshot.vpns?.find(item => item.id === appState.selectedVpn);
+  const interfaces = appState.page === "dashboard" ? dashboardInterfaces() : appState.trafficScope === "vpn" && vpn ? [{name:vpn.history_key, label:vpn.name}] : managedInterfaces();
+  const series = interfaces.map(item => appState.history.filter(row => row.interface === item.name));
+  const timestamps = series.flatMap(rows => rows.map(row => new Date(row.ts).getTime()));
+  const startTime = timestamps.length ? Math.min(...timestamps) : Date.now() - 3600000;
+  const endTime = timestamps.length ? Math.max(...timestamps) : Date.now();
   const values = series.flatMap(rows => rows.flatMap(row => [Number(row.rx_bps), Number(row.tx_bps)]));
   const max = Math.max(...values, 1) * 1.12;
   ctx.font = "10px system-ui"; ctx.fillStyle = "#7f94ae"; ctx.strokeStyle = "#263a53"; ctx.lineWidth = 1;
@@ -538,16 +604,24 @@ function drawTrafficChart(canvas) {
   }
   interfaces.forEach((item, index) => {
     const rows = series[index];
-    [["rx_bps", interfaceColor(index), 2], ["tx_bps", index === 0 ? "#63b0ff" : index === 1 ? "#7cebe6" : "#c0afff", 1]].forEach(([key, color, lineWidth]) => {
+    [["rx_bps", interfaceColor(index), 2], ["tx_bps", interfaceColor(index), 1.5]].forEach(([key, color, lineWidth]) => {
       ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = lineWidth;
+      ctx.setLineDash(key === "tx_bps" ? [5, 4] : []);
       rows.forEach((row, rowIndex) => {
-        const x = pad.left + (rows.length <= 1 ? 0 : rowIndex / (rows.length - 1)) * innerW;
+        const x = pad.left + (new Date(row.ts).getTime() - startTime) / Math.max(endTime - startTime, 1) * innerW;
         const y = pad.top + innerH - (Number(row[key]) / max) * innerH;
         if (rowIndex === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.stroke();
+      ctx.setLineDash([]);
     });
   });
+  ctx.fillStyle = "#91a5bf";
+  for (let i = 0; i <= 4; i++) {
+    const time = new Date(startTime + (endTime-startTime)*i/4);
+    const text = time.toLocaleString("fr-FR", appState.trafficHours > 24 ? {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"} : {hour:"2-digit", minute:"2-digit"});
+    ctx.fillText(text, pad.left + innerW*i/4 - (i === 4 ? ctx.measureText(text).width : 0), height-5);
+  }
   if (!values.length) { ctx.fillStyle = "#91a5bf"; ctx.fillText("Collecte des premières mesures…", pad.left + 20, pad.top + innerH / 2); }
 }
 
@@ -558,7 +632,13 @@ function bindPageLinks() {
 function setPage(page) {
   appState.page = page;
   if (page === "events") loadEvents();
-  else if (page === "traffic") Promise.all([ensureHistory(appState.trafficHours, true), refreshFlows()]).then(() => { if (appState.page === "traffic") renderPage(); }).catch(error => toast(error.message, true));
+  else if (page === "traffic") {
+    renderPage();
+    Promise.allSettled([ensureHistory(appState.trafficHours, true), refreshFlows()]).then(results => {
+      results.forEach(result => { if (result.status === "rejected") toast(result.reason.message, true); });
+      if (appState.page === "traffic") renderPage(true);
+    });
+  }
   else renderPage();
 }
 
@@ -689,6 +769,7 @@ async function saveSettings() {
   const payload = {
     enforcement_enabled: $("#enforcement").checked,
     sample_interval_seconds: Number($("#sample-interval").value),
+    history_interval_seconds: Number($("#history-interval").value),
     retention_days: Number($("#retention-days").value),
     display_rate_unit: $("#display-rate-unit").value,
     dashboard_managed_only: $("#dashboard-managed-only").checked,
@@ -718,5 +799,6 @@ $("#rule-form").addEventListener("submit", saveRule);
 $("#rule-form").addEventListener("input", updateRoutePreview);
 window.addEventListener("resize", () => { if (appState.page === "dashboard" || appState.page === "traffic") drawTrafficChart($("#traffic-chart")); });
 
-refreshSnapshot(true).then(() => ensureHistory(1, true)).then(() => renderPage());
-setInterval(() => refreshSnapshot(false), 2500);
+renderPage();
+refreshSnapshot(true);
+setInterval(() => refreshSnapshot(false), 5000);

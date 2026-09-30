@@ -6,6 +6,7 @@ import os
 import platform
 import socket
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import psutil
@@ -112,10 +113,16 @@ def _docker_client():
 def discover_apps() -> list[dict[str, Any]]:
     apps: list[dict[str, Any]] = []
     client = _docker_client()
+    if client is None and platform.system() == "Linux":
+        raise RuntimeError("Docker inaccessible ; vérifiez le montage de /var/run/docker.sock")
     if client is not None:
         try:
-            for container in client.containers.list(all=False):
+            for container in client.containers.list(all=True):
                 attrs = container.attrs
+                image = attrs.get("Config", {}).get("Image", "")
+                is_vpn = image.split("/")[-1].split(":")[0].split("@")[0] == "gluetun"
+                if container.status not in {"running", "restarting"} and not is_vpn:
+                    continue
                 networks = attrs.get("NetworkSettings", {}).get("Networks", {})
                 ips = sorted({data.get("IPAddress") for data in networks.values() if data.get("IPAddress")})
                 ports = []
@@ -127,6 +134,13 @@ def discover_apps() -> list[dict[str, Any]]:
                     or labels.get("org.opencontainers.image.title")
                     or container.name
                 )
+                if display in {"app", "web", "server"}:
+                    display = container.name
+                env = dict(item.split("=", 1) for item in attrs.get("Config", {}).get("Env", []) if "=" in item) if is_vpn else {}
+                try:
+                    auth = json.loads(env.get("HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE", "{}"))
+                except (ValueError, TypeError):
+                    auth = {}
                 apps.append(
                     {
                         "id": container.id[:12],
@@ -134,14 +148,37 @@ def discover_apps() -> list[dict[str, Any]]:
                         "name": display,
                         "type": "docker",
                         "status": container.status,
-                        "image": attrs.get("Config", {}).get("Image", ""),
+                        "image": image,
                         "ips": ips,
                         "ports": ports,
                         "networks": sorted(networks.keys()),
+                        "docker_name": container.name,
+                        "pid": attrs.get("State", {}).get("Pid", 0),
+                        "health": attrs.get("State", {}).get("Health", {}).get("Status", "unknown"),
+                        "network_mode": attrs.get("HostConfig", {}).get("NetworkMode", ""),
+                        "is_vpn": is_vpn,
+                        "vpn_type": env.get("VPN_TYPE", "openvpn") if is_vpn else None,
+                        "vpn_provider": env.get("VPN_SERVICE_PROVIDER", "custom") if is_vpn else None,
+                        "vpn_control_port": env.get("HTTP_CONTROL_SERVER_ADDRESS", ":8000").rsplit(":", 1)[-1] if is_vpn else None,
+                        "_vpn_auth": auth,
                     }
                 )
         except Exception:
-            pass
+            import logging
+            logging.getLogger(__name__).exception("Découverte Docker indisponible")
+            raise RuntimeError("Docker ne répond pas ; dernières applications conservées") from None
+        finally:
+            client.close()
+
+    by_identity = {key: app for app in apps for key in (app["id"], app["container_id"], app["docker_name"])}
+    for app in apps:
+        mode = app.get("network_mode", "")
+        if mode.startswith("container:"):
+            owner = by_identity.get(mode.split(":", 1)[1])
+            if owner:
+                app["network_owner_id"] = owner["id"]
+                app["vpn_id"] = owner["id"] if owner["is_vpn"] else None
+                app["shared_ips"] = owner["ips"]
 
     apps.append(
         {
@@ -171,16 +208,26 @@ def container_stats(apps: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
     if client is None:
         return {}
     result: dict[str, dict[str, int]] = {}
-    try:
-        for app in apps:
-            if not app.get("container_id"):
-                continue
-            stats = client.containers.get(app["container_id"]).stats(stream=False)
+    def read(app):
+        try:
+            # one_shot avoids waiting for a second Docker sample for each container.
+            stats = client.api.stats(app["container_id"], stream=False, one_shot=True)
             networks = stats.get("networks", {})
-            result[app["id"]] = {
+            return app["id"], {
                 "rx_bytes": sum(item.get("rx_bytes", 0) for item in networks.values()),
                 "tx_bytes": sum(item.get("tx_bytes", 0) for item in networks.values()),
             }
-    except Exception:
-        return result
+        except Exception:
+            return app["id"], None
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for identity, stats in pool.map(read, [item for item in apps if item.get("container_id") and item.get("status") == "running"]):
+                if stats is not None:
+                    result[identity] = stats
+    finally:
+        client.close()
     return result
+
+
+def public_apps(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{key: value for key, value in item.items() if not key.startswith("_")} for item in items]

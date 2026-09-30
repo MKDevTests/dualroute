@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from typing import Any
 from pathlib import Path
+from .processes import proc_root
 
 
 ROUTE_MARKS = {0x65: "eth0", 0x66: "eth1"}
@@ -95,7 +96,7 @@ def _endpoint(values: dict[str, str], address_key: str, port_key: str) -> str:
     return f"{address}:{port}" if port else address
 
 
-def attribute_flow(flow: dict[str, Any], apps: list[dict[str, Any]], local_addresses: set[str] | None = None) -> dict[str, Any]:
+def attribute_flow(flow: dict[str, Any], apps: list[dict[str, Any]], local_addresses: set[str] | None = None, sockets=None, namespace_pid=None) -> dict[str, Any]:
     ip_to_app = {
         address: app
         for app in apps
@@ -136,6 +137,29 @@ def attribute_flow(flow: dict[str, Any], apps: list[dict[str, Any]], local_addre
             app = next((item for item in apps if item.get("id") == "service:smb"), None)
             direction = "entrant" if _number(original.get("dport")) in {139, 445} else "sortant"
 
+    match = None
+    matched_tuple = None
+    if sockets:
+        socket_namespace = namespace_pid or (app.get("pid") if app else None)
+        for values in (flow["original"], flow["reply"]):
+            match = sockets.match(flow["protocol"], values, local_addresses, socket_namespace)
+            if match:
+                matched_tuple = values
+                break
+    attribution = "Adresse Docker" if app else "Non résolu"
+    if match:
+        metadata, side = match
+        app = metadata.get("app") or app
+        flow["process"] = metadata["process"]
+        flow["pid"] = metadata["pid"]
+        attribution = "Socket du processus"
+        # A reply tuple reverses original/reply counters, including after NAT.
+        outgoing_original = (side == "src") == (matched_tuple is flow["original"])
+        direction = "sortant" if outgoing_original else "entrant"
+        if matched_tuple is flow["reply"]:
+            original = {"src": matched_tuple.get("dst"), "sport": matched_tuple.get("dport"),
+                        "dst": matched_tuple.get("src"), "dport": matched_tuple.get("sport")}
+
     if direction == "sortant":
         local_endpoint = _endpoint(original, "src", "sport")
         remote_endpoint = _endpoint(original, "dst", "dport")
@@ -151,8 +175,8 @@ def attribute_flow(flow: dict[str, Any], apps: list[dict[str, Any]], local_addre
 
     flow.update(
         {
-            "app_id": app.get("id") if app else "host:unattributed",
-            "application": app.get("name") if app else "Hôte / non attribué",
+            "app_id": app.get("id") if app else (f"host:process:{flow['process']}" if match else "host:unattributed"),
+            "application": app.get("name") if app else (f"Processus NAS · {flow['process']}" if match else "Hôte / non attribué"),
             "container_id": (app.get("container_id") or "")[:12] if app else None,
             "app_type": app.get("type") if app else "host",
             "direction": direction,
@@ -165,6 +189,9 @@ def attribute_flow(flow: dict[str, Any], apps: list[dict[str, Any]], local_addre
             ),
             "rx_bytes": rx_bytes,
             "tx_bytes": tx_bytes,
+            "attribution": attribution,
+            "vpn_id": app.get("vpn_id") if app else None,
+            "local_only": original.get("src") in {"127.0.0.1", "::1"} and original.get("dst") in {"127.0.0.1", "::1"},
         }
     )
     flow.pop("original", None)
@@ -172,7 +199,7 @@ def attribute_flow(flow: dict[str, Any], apps: list[dict[str, Any]], local_addre
     return flow
 
 
-def discover_flows(apps: list[dict[str, Any]], limit: int = 1000, interfaces: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def discover_flows(apps: list[dict[str, Any]], limit: int = 1000, interfaces: list[dict[str, Any]] | None = None, sockets=None, namespace_pid: int | None = None) -> dict[str, Any]:
     if platform.system() != "Linux" or shutil.which("conntrack") is None:
         return {
             "available": False,
@@ -181,6 +208,7 @@ def discover_flows(apps: list[dict[str, Any]], limit: int = 1000, interfaces: li
         }
     try:
         result = subprocess.run(
+            (["nsenter", f"--net={proc_root() / str(int(namespace_pid)) / 'ns/net'}", "--"] if namespace_pid else []) +
             ["conntrack", "-L", "-f", "ipv4", "-o", "extended"],
             capture_output=True,
             text=True,
@@ -198,7 +226,7 @@ def discover_flows(apps: list[dict[str, Any]], limit: int = 1000, interfaces: li
     for line in result.stdout.splitlines():
         parsed = parse_conntrack_line(line)
         if parsed:
-            attributed = attribute_flow(parsed, apps, local_addresses)
+            attributed = attribute_flow(parsed, apps, local_addresses, sockets, namespace_pid)
             if not attributed["interface"]:
                 # A connected subnet is a reliable route hint, not proof of policy routing.
                 destination = attributed["remote_endpoint"].split(":")[0]
@@ -210,7 +238,7 @@ def discover_flows(apps: list[dict[str, Any]], limit: int = 1000, interfaces: li
                             matches.append((network.prefixlen, interface["name"]))
                     except ValueError:
                         continue
-                if matches:
+                if matches and len({name for prefix, name in matches if prefix == max(matches)[0]}) == 1:
                     attributed["interface"] = max(matches)[1]
                     attributed["interface_source"] = "Sous-réseau connecté (estimé)"
             else:
@@ -219,8 +247,12 @@ def discover_flows(apps: list[dict[str, Any]], limit: int = 1000, interfaces: li
     items.sort(key=lambda item: item["rx_bytes"] + item["tx_bytes"], reverse=True)
     missing = sum(not item["accounting"] for item in items)
     try:
-        accounting_enabled = Path("/proc/sys/net/netfilter/nf_conntrack_acct").read_text().strip() == "1"
-    except OSError:
+        if namespace_pid:
+            check = subprocess.run(["nsenter", f"--net={proc_root() / str(int(namespace_pid)) / 'ns/net'}", "--", "sysctl", "-n", "net.netfilter.nf_conntrack_acct"], capture_output=True, text=True, timeout=3)
+            accounting_enabled = check.returncode == 0 and check.stdout.strip() == "1"
+        else:
+            accounting_enabled = Path("/proc/sys/net/netfilter/nf_conntrack_acct").read_text().strip() == "1"
+    except (OSError, subprocess.SubprocessError):
         accounting_enabled = False
     return {
         "available": True,

@@ -23,6 +23,10 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
+      - name: Build Linux integration image
+        run: docker build -t dualroute:test .
+      - name: Verify host process and Gluetun namespace monitoring
+        run: python tests/linux_smoke.py
 
   container:
     needs: test

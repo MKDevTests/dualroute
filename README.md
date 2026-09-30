@@ -43,15 +43,47 @@ docker compose up -d
 
 Ouvrir ensuite `http://ADRESSE_DU_NAS:9080`.
 
-Pour mesurer le débit de chaque connexion, activez la comptabilité Linux sur le NAS depuis SSH :
+Depuis la version 0.4, le Compose active automatiquement les compteurs lors de la consultation du trafic, sur l’hôte et dans les espaces réseau Gluetun. L’option `DUALROUTE_ENABLE_ACCOUNTING=0` désactive cette activation. Aucune connexion n’est interrompue ou vidée. Pour une activation manuelle sur l’hôte :
 
 ```bash
 sudo sysctl -w net.netfilter.nf_conntrack_acct=1
 ```
 
-Les compteurs sont ajoutés aux nouvelles connexions. Les connexions déjà ouvertes peuvent rester sans compteurs jusqu’à leur renouvellement. La page Trafic affiche « — » quand une mesure est indisponible et indique ce prérequis si nécessaire. Le réglage doit être réactivé après un redémarrage du NAS ou rendu persistant via la configuration système de ZimaOS.
+Les compteurs sont ajoutés aux nouvelles connexions. Les connexions déjà ouvertes peuvent rester sans compteurs jusqu’à leur renouvellement. La page Trafic distingue « Mesure… » pour la première mesure et « Sans compteur » pour ces anciennes connexions. Les débits sont calculés sur le serveur entre deux collectes, toutes les cinq secondes quand la page Trafic est consultée. L’activation du réglage hôte seul ne fournit pas les compteurs des espaces réseau VPN.
 
-Dans Trafic, les volumes par application correspondent aux connexions encore présentes dans la table de suivi ; les connexions terminées entre deux mesures peuvent échapper au relevé. Les marques DualRoute identifient l’interface de routage ; pour les flux sans marque, un sous-réseau connecté donne une indication signalée comme estimée. Une interface non déterminable reste « Non identifiée ». Le trafic hôte sans IP Docker ou port publié identifiable apparaît comme « Hôte / non attribué ». L’encapsulation Tailscale peut apparaître comme trafic hôte ; les totaux des interfaces ne sont donc pas une somme exacte des flux attribués.
+Dans Trafic, les volumes par application correspondent aux connexions encore présentes dans la table de suivi ; les connexions terminées entre deux mesures peuvent échapper au relevé. Les marques DualRoute identifient l’interface de routage ; pour les flux sans marque, un sous-réseau connecté non ambigu donne une indication signalée comme estimée. Une interface non déterminable reste « Non identifiée ». DualRoute croise les sockets Linux, les PID et les groupes Docker pour identifier les processus du NAS, les conteneurs en mode hôte et les applications partageant un Gluetun. Si cette lecture est refusée ou si le processus a déjà disparu, les adresses Docker et ports publiés servent de repli ; une attribution impossible reste explicitement non résolue. Les connexions de boucle locale sont masquées par défaut, avec un bouton indiquant leur nombre. Les totaux des interfaces ne sont pas une somme exacte des flux attribués et peuvent compter le même transfert sur plusieurs interfaces.
+
+La découverte des interfaces, des applications, des VPN, des statistiques Docker et des connexions est indépendante, hors des requêtes HTTP. Une source lente ne bloque plus le tableau de bord. Les interfaces sont actualisées toutes les quinze secondes, Docker toutes les vingt secondes et ses statistiques cumulées toutes les trente secondes. Les mesures réseau en direct restent en mémoire (cinq secondes par défaut). L’historique n’enregistre que les interfaces gérées et les VPN : une moyenne toutes les soixante secondes par interface, avec regroupement des anciennes mesures à la lecture. Les bridges et veth ne sont pas enregistrés dans l’historique. La première moyenne apparaît après une minute. Ces deux intervalles se règlent séparément dans Paramètres.
+
+## Surveillance Gluetun
+
+Les conteneurs utilisant une image nommée `gluetun` sont détectés automatiquement, y compris s’ils sont arrêtés. Sans Gluetun détecté, les sections VPN sont masquées. Un conteneur détecté mais non observable reste affiché « Indéterminé ».
+
+- **Tableau de bord** : bloc violet séparé, état Docker, santé, état du tunnel, débits reçus/envoyés, IP publique et applications liées.
+- **Trafic** : onglets « Interfaces du NAS » et « VPN des conteneurs », choix du VPN, connexions dans son espace réseau, processus/applications, historique du tunnel. Les connexions LAN et de supervision présentes dans cet espace réseau sont incluses ; les débits des cartes `tun*`/`wg*` mesurent le tunnel lui-même.
+- **Réseau** : groupe VPN en observation seule ; les interfaces administrables restent ETH0, ETH1 et Tailscale.
+- **Paramètres** : clé API facultative pour lire le statut interne et l’IP publique.
+
+L’état « Connecté » nécessite un conteneur actif, une interface de tunnel observable et un healthcheck Docker sain. Un simple statut Docker `running` ou API `running` ne suffit pas. Le débit VPN n’est jamais ajouté aux compteurs des interfaces physiques. Aucun redémarrage ou changement de configuration Gluetun n’est exécuté.
+
+L’API Gluetun demande généralement une authentification. Configurez un rôle dédié en lecture seule dans `/gluetun/auth/config.toml` :
+
+```toml
+[[roles]]
+name = "dualroute"
+routes = ["GET /v1/vpn/status", "GET /v1/publicip/ip"]
+auth = "apikey"
+apikey = "VOTRE_CLE"
+```
+
+Saisissez la même clé dans Paramètres. Elle est stockée dans le volume local et n’est jamais renvoyée par les API de configuration. Une authentification déjà définie dans `HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE` est utilisée automatiquement ; la clé saisie dans DualRoute prend la priorité. L’accès utilise directement l’adresse Docker du VPN et le port de contrôle détecté (8000 par défaut) ; publier ce port sur Internet est inutile. Le pare-feu Gluetun doit autoriser l’accès local à ce port. Sans accès à cette API, la santé Docker et les compteurs du tunnel restent disponibles ; l’IP publique apparaît « Non disponible ». Voir la [documentation officielle du serveur de contrôle Gluetun](https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/control-server.md) et du [healthcheck](https://github.com/qdm12/gluetun-wiki/blob/main/faq/healthcheck.md).
+
+Pour passer d’une ancienne version à la 0.4, remplacez le Compose puis recréez le conteneur : les nouveaux montages et capacités ne sont pas ajoutés par un simple redémarrage. Gardez le même volume `dualroute-data` pour conserver les règles et paramètres.
+
+```bash
+docker compose pull
+docker compose up -d --force-recreate
+```
 
 Le rafraîchissement conserve le tri, les filtres, la largeur des colonnes et la position dans les tableaux. Les pages Paramètres et Réseau restent stables pendant la saisie. Un bouton permet de suspendre l’actualisation de Trafic.
 
@@ -61,6 +93,8 @@ Le fichier Compose utilise :
 
 - `network_mode: host`, nécessaire pour voir et administrer les interfaces du NAS ;
 - les capacités `NET_ADMIN` et `NET_RAW` pour `ip`, `nftables` et les tests de passerelle ;
+- `SYS_PTRACE` et `/proc:/host/proc:ro` pour relier les sockets aux processus hôtes et conteneurs ;
+- `SYS_ADMIN` pour rejoindre uniquement les espaces réseau VPN avec `nsenter` et lire leurs compteurs/connexions. Cette capacité est large : le conteneur doit être considéré comme un outil d’administration du NAS ;
 - `/var/run/docker.sock` en lecture seule pour découvrir les applications ;
 - un volume `dualroute-data` pour la base SQLite.
 

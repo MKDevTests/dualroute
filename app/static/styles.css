@@ -32,6 +32,9 @@ button { cursor: pointer; }
 .brand { display: flex; flex-wrap: wrap; align-items: baseline; padding: 0 12px 24px; font-size: 22px; letter-spacing: -.8px; }
 .brand strong { color: var(--blue); }
 .brand small { flex-basis: 100%; margin-top: 2px; color: var(--muted); font-size: 10px; letter-spacing: 0; }
+.brand { padding-inline: 4px; align-items: center; flex-wrap: nowrap; gap: 9px; font-size: 21px; }
+.brand img { flex: 0 0 36px; }
+.brand small { display: block; font-size: 9px; }
 nav { display: grid; gap: 5px; }
 nav button { display: flex; gap: 13px; align-items: center; height: 46px; padding: 0 13px; color: #b8c6d9; border: 0; border-radius: 7px; background: transparent; text-align: left; }
 nav button:hover { background: rgba(255,255,255,.04); color: white; }
@@ -101,6 +104,28 @@ header p { margin-top: 2px; color: var(--muted); font-size: 12px; }
 canvas { width: 100%; height: 100%; }
 .legend { display: flex; gap: 18px; color: var(--muted); font-size: 11px; }
 .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--legend); }
+.chart-legend { flex-wrap: wrap; align-items: center; padding: 10px 14px; gap: 12px; }
+.chart-legend small { color: #b9cbe0; }
+.vpn-section { margin-top: 22px; padding-top: 17px; border-top: 1px solid #59467f; }
+.vpn-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; }
+.vpn-card { padding: 17px; border: 1px solid #4b3b70; border-left: 4px solid #9b7cff; border-radius: 10px; background: linear-gradient(130deg, #241c38, #111d2d); }
+.vpn-head { display: flex; align-items: center; gap: 12px; }
+.vpn-head h3 { font-size: 16px; }
+.vpn-head small, .vpn-footer small, .vpn-stats small { color: var(--muted); }
+.vpn-head .badge { margin-left: auto; }
+.vpn-icon { color: #c0afff; font-size: 28px; }
+.vpn-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-block: 18px; }
+.vpn-stats div { display: grid; gap: 5px; }
+.vpn-stats b { font-size: 16px; }
+.vpn-detail { color: #b8a9d2; font-size: 11px; line-height: 1.7; }
+.vpn-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #3b3154; font-size: 11px; }
+.traffic-note { padding: 8px 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.traffic-tabs { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.traffic-tabs label { margin-left: auto; display: flex; align-items: center; min-width: 250px; }
+.traffic-options { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-block: 12px; color: var(--muted); font-size: 11px; }
+.traffic-options label { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.traffic-options input { width: 16px; height: 16px; }
+.process-pid { display: block; margin-top: 3px; color: var(--muted); }
 
 .data-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 11px; }
 .data-table.wide { min-width: 1500px; }
@@ -201,4 +226,10 @@ input[type="checkbox"] { width: 38px; height: 21px; accent-color: var(--blue); }
   .sidebar { padding-inline: 8px; }
   .split { grid-template-columns: minmax(560px, 1.4fr) minmax(300px, .8fr); }
   .network-details { grid-template-columns: repeat(3, 1fr); }
+  .card-head { flex-wrap: wrap; }
+  .card-address { flex-basis: 100%; text-align: left; margin-left: 50px; }
+  .card-stats { grid-template-columns: repeat(2, 1fr); gap: 14px 0; }
+  .stat:nth-child(2) { border-right: 0; }
+  .stat:nth-child(3) { padding-left: 0; }
+  .stat b { white-space: nowrap; }
 }

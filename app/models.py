@@ -58,7 +58,12 @@ class NetworkConfigureRequest(BaseModel):
 
 class SettingInput(BaseModel):
     enforcement_enabled: bool
-    sample_interval_seconds: int = Field(default=2, ge=1, le=60)
+    sample_interval_seconds: int = Field(default=5, ge=2, le=60)
+    history_interval_seconds: int = Field(default=60, ge=30, le=3600)
     retention_days: int = Field(default=30, ge=1, le=365)
     display_rate_unit: Literal["mbps", "MBps"] = "mbps"
     dashboard_managed_only: bool = True
+
+
+class VPNAccessInput(BaseModel):
+    api_key: str = Field(default="", max_length=512)

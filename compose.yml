@@ -9,16 +9,21 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
+      - SYS_PTRACE
+      - SYS_ADMIN
     security_opt:
       - no-new-privileges:true
     environment:
       DUALROUTE_PORT: "9080"
       DUALROUTE_DATA_DIR: /var/lib/dualroute
       DUALROUTE_DOCKER_SOCKET: /var/run/docker.sock
+      DUALROUTE_HOST_PROC: /host/proc
+      DUALROUTE_ENABLE_ACCOUNTING: "1"
       TZ: Europe/Paris
     volumes:
       - dualroute-data:/var/lib/dualroute
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
 
 volumes:
   dualroute-data:

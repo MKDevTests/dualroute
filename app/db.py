@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -19,10 +20,15 @@ class Store:
         self._lock = threading.RLock()
         self._init()
 
-    def connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def connect(self):
         connection = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _init(self) -> None:
         with self.connect() as db:
@@ -80,7 +86,8 @@ class Store:
             )
         defaults = {
             "enforcement_enabled": False,
-            "sample_interval_seconds": 2,
+            "sample_interval_seconds": 5,
+            "history_interval_seconds": 60,
             "retention_days": 30,
             "display_rate_unit": "mbps",
             "dashboard_managed_only": True,
@@ -88,6 +95,9 @@ class Store:
         for key, value in defaults.items():
             if self.get_setting(key) is None:
                 self.set_setting(key, value)
+        if self.get_setting("monitoring_schema", 0) < 1:
+            self.set_setting("sample_interval_seconds", max(5, self.get_setting("sample_interval_seconds", 5)))
+            self.set_setting("monitoring_schema", 1)
 
     @staticmethod
     def _rule(row: sqlite3.Row) -> dict[str, Any]:
@@ -153,7 +163,7 @@ class Store:
     def settings(self) -> dict[str, Any]:
         with self.connect() as db:
             rows = db.execute("SELECT key,value_json FROM settings").fetchall()
-        return {row["key"]: json.loads(row["value_json"]) for row in rows}
+        return {row["key"]: json.loads(row["value_json"]) for row in rows if not row["key"].startswith("secret:")}
 
     def add_samples(self, rows: list[tuple[str, str, float, float, int, int]]) -> None:
         if not rows:
@@ -164,10 +174,17 @@ class Store:
                 rows,
             )
 
-    def samples(self, since: str, limit: int = 5000) -> list[dict[str, Any]]:
+    def samples(self, since: str, limit: int = 5000, bucket_seconds: int = 60) -> list[dict[str, Any]]:
         with self.connect() as db:
             rows = db.execute(
-                "SELECT * FROM samples WHERE ts>=? ORDER BY ts DESC LIMIT ?", (since, limit)
+                """SELECT strftime('%Y-%m-%dT%H:%M:%S+00:00',
+                       CAST(strftime('%s', ts) AS INTEGER)/?*?, 'unixepoch') AS ts,
+                       interface, AVG(rx_bps) AS rx_bps, AVG(tx_bps) AS tx_bps,
+                       MAX(rx_bytes) AS rx_bytes, MAX(tx_bytes) AS tx_bytes
+                   FROM samples WHERE ts>=? AND
+                       (interface IN ('eth0','eth1','tailscale','tailscale0') OR interface LIKE 'vpn:%')
+                   GROUP BY interface, CAST(strftime('%s', ts) AS INTEGER)/?
+                   ORDER BY ts DESC LIMIT ?""", (bucket_seconds, bucket_seconds, since, bucket_seconds, limit)
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 

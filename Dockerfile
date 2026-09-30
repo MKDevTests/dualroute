@@ -12,7 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        conntrack curl iproute2 iputils-ping nftables procps \
+        conntrack curl iproute2 iputils-ping nftables procps util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/dualroute
@@ -24,6 +24,6 @@ RUN mkdir -p /var/lib/dualroute
 
 EXPOSE 9080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:9080/api/health || exit 1
+  CMD curl -fsS "http://127.0.0.1:${DUALROUTE_PORT}/api/health" || exit 1
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${DUALROUTE_PORT}"]
