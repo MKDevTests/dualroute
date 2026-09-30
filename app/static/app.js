@@ -250,7 +250,7 @@ async function refreshSnapshot(forceRender = false) {
     const managedCount = managedInterfaces().length;
     const otherCount = appState.snapshot.interfaces.length - managedCount;
     $("#side-count").textContent = !nextSnapshot.discovery?.interfaces ? "Collecte initiale des interfaces…" : `${appState.snapshot.apps.length} applications • ${managedCount} gérées${otherCount ? ` • ${otherCount} autres` : ""}`;
-    $("#side-version").textContent = `v${nextSnapshot.version || "0.4.1"}`;
+    $("#side-version").textContent = `v${nextSnapshot.version || "0.4.2"}`;
     const issues = Object.values(nextSnapshot.discovery || {}).filter(source => source.state === "error");
     const healthTitle = $(".system-health b");
     healthTitle.textContent = issues.length ? "Collecte partielle" : "Système opérationnel";

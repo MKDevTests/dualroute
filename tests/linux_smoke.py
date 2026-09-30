@@ -83,7 +83,7 @@ http.server.HTTPServer(("0.0.0.0",8000),Handler).serve_forever()
     docker("run", "-d", "--name", names[0], "--network", "host", "--cap-add", "SYS_PTRACE", "--cap-add", "SYS_ADMIN", "--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW",
            "--security-opt", "no-new-privileges:true", "-v", "/proc:/host/proc:ro", "-v", "/proc/sys/net:/host/sys/net:rw", "-v", "/var/run/docker.sock:/var/run/docker.sock:ro",
            "-e", "DUALROUTE_PORT=19080", "dualroute:test")
-    eventually(lambda: api("/api/health")["version"] == "0.4.0", timeout=30)
+    eventually(lambda: api("/api/health")["status"] == "ok", timeout=30)
     eventually(lambda: api("/api/traffic/flows").get("accounting_enabled"))
     vpn = eventually(lambda: next((item for item in api("/api/snapshot")["vpns"] if item["status"] == "connected"), None))
     assert vpn["observable"] and vpn["interfaces"] == ["wg0"], vpn

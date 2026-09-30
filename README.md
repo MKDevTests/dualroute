@@ -65,7 +65,7 @@ Le profil AppArmor Docker est conservé. Sur les systèmes où il interdit la le
 
 Les conteneurs utilisant une image nommée `gluetun` sont détectés automatiquement, y compris s’ils sont arrêtés. Sans Gluetun détecté, les sections VPN sont masquées. Un conteneur détecté mais non observable reste affiché « Indéterminé ».
 
-Si les cartes VPN n’apparaissent pas après une mise à jour alors que `/api/snapshot` contient les VPN, rechargez l’onglet avec **Ctrl+F5**. Depuis la 0.4.1, les fichiers JavaScript/CSS sont versionnés et les réponses de l’interface ne sont plus mises en cache. Un refus de l’API Gluetun ne masque pas le VPN : son état Docker et les mesures locales restent affichés, seule la lecture du statut interne et de l’IP publique nécessite les droits API.
+Si les cartes VPN n’apparaissent pas après une mise à jour alors que `/api/snapshot` contient les VPN, rechargez l’onglet avec **Ctrl+F5**. Depuis la 0.4.2, les fichiers JavaScript/CSS sont versionnés et les réponses de l’interface ne sont plus mises en cache. Un refus de l’API Gluetun ne masque pas le VPN : son état Docker et les mesures locales restent affichés, seule la lecture du statut interne et de l’IP publique nécessite les droits API.
 
 - **Tableau de bord** : bloc violet séparé, état Docker, santé, état du tunnel, débits reçus/envoyés, IP publique et applications liées.
 - **Trafic** : onglets « Interfaces du NAS » et « VPN des conteneurs », choix du VPN, connexions dans son espace réseau, processus/applications, historique du tunnel. Les connexions LAN et de supervision présentes dans cet espace réseau sont incluses ; les débits des cartes `tun*`/`wg*` mesurent le tunnel lui-même.
