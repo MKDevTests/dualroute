@@ -48,14 +48,26 @@ def route_capable_interfaces(interfaces: list[dict[str, Any]]) -> list[dict[str,
 
 
 def validate_distinct_networks(interfaces: list[dict[str, Any]]) -> list[str]:
-    warnings: list[str] = []
-    routed = route_capable_interfaces(interfaces)
-    networks = [item.get("network") for item in routed]
-    if len(networks) != len(set(networks)):
-        warnings.append("Les deux passerelles utilisent le même sous-réseau. Utilisez des sous-réseaux distincts.")
-    if len(routed) < 2:
-        warnings.append("Deux interfaces actives avec une passerelle sont nécessaires pour le double routage.")
-    return warnings
+    status = network_status(interfaces)
+    return [status["message"]] if status["warning"] else []
+
+
+def network_status(interfaces: list[dict[str, Any]]) -> dict[str, Any]:
+    physical = {item["name"].lower(): item for item in interfaces if item["name"].lower() in {"eth0", "eth1"}}
+    unavailable = [name.upper() for name in ("eth0", "eth1") if name not in physical or not physical[name].get("up") or not physical[name].get("address")]
+    if unavailable:
+        return {"mode": "incomplete", "warning": True, "title": "Interface absente ou non configurée",
+                "message": f"{', '.join(unavailable)} : interface absente, inactive ou sans adresse IPv4. Aucune adresse ni passerelle n’est proposée automatiquement."}
+    networks = [item.get("network") for item in physical.values() if item.get("network")]
+    if len(networks) == 2 and len(set(networks)) == 1:
+        return {"mode": "overlap", "warning": True, "title": "Même sous-réseau sur les deux cartes",
+                "message": f"ETH0 et ETH1 utilisent le même sous-réseau {networks[0]}. Des routes et réponses ambiguës sont possibles ; vérifiez la topologie avant de modifier une adresse."}
+    local = [name.upper() for name, item in physical.items() if not item.get("gateway")]
+    if local:
+        return {"mode": "local", "warning": False, "title": "Réseau local uniquement · " + ", ".join(local),
+                "message": f"{', '.join(local)} sans passerelle : accès au sous-réseau local et à SMB, configuration valide. Le double routage Internet nécessite une passerelle réelle sur chaque carte ; DualRoute peut l’utiliser dans ses tables dédiées sans ajouter une deuxième route par défaut au NAS."}
+    return {"mode": "dual", "warning": False, "title": "Deux sorties Internet configurées",
+            "message": "ETH0 et ETH1 ont une adresse et une passerelle sur des sous-réseaux distincts. Les passerelles doivent être testées avant l’application des règles."}
 
 
 def _app_ips(apps: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -156,7 +168,8 @@ def build_apply_plan(
 ) -> list[Command]:
     routed = route_capable_interfaces(interfaces)[:2]
     if len(routed) < 2:
-        raise NetworkError("Deux interfaces actives avec adresse et passerelle sont requises")
+        missing = [name.upper() for name in ("eth0", "eth1") if name not in {item["name"].lower() for item in routed}]
+        raise NetworkError(f"Double routage Internet indisponible : {', '.join(missing)} sans adresse, passerelle ou lien actif. Une carte sans passerelle reste utilisable sur le réseau local.")
     commands: list[Command] = [
         Command(["nft", "delete", "table", "inet", "dualroute"], ignore_failure=True),
         Command(["nft", "-f", "-"], stdin=build_nft_script(rules, apps, interfaces)),
@@ -222,6 +235,8 @@ def execute_plan(commands: list[Command]) -> list[dict[str, Any]]:
 def test_gateway(interface: str, gateway: str) -> dict[str, Any]:
     if not re.fullmatch(r"[a-zA-Z0-9_.:-]+", interface):
         raise NetworkError("Nom d'interface invalide")
+    if not gateway:
+        return {"ok": True, "latency_ms": None, "message": "Réseau local uniquement : aucune passerelle à tester. La connexion réseau n’est pas testée."}
     try:
         ipaddress.ip_address(gateway)
     except ValueError as exc:
@@ -244,10 +259,14 @@ def test_gateway(interface: str, gateway: str) -> dict[str, Any]:
 
 def build_interface_plan(config: dict[str, Any]) -> list[Command]:
     interface = config["interface"]
+    if interface not in {"eth0", "eth1"}:
+        raise NetworkError("Seules ETH0 et ETH1 peuvent être reconfigurées")
     address = ipaddress.ip_address(config["address"])
-    gateway = ipaddress.ip_address(config["gateway"])
+    gateway = ipaddress.ip_address(config["gateway"]) if config.get("gateway") else None
     network = ipaddress.ip_network(f"{address}/{config['prefix']}", strict=False)
-    if gateway not in network:
+    if address.version != 4 or (gateway and gateway.version != 4):
+        raise NetworkError("La configuration des cartes utilise IPv4")
+    if gateway and gateway not in network:
         raise NetworkError("La passerelle doit appartenir au même sous-réseau que l'adresse")
     return [
         Command(["ip", "link", "set", "dev", interface, "up"]),

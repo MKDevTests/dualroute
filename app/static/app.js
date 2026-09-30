@@ -250,7 +250,7 @@ async function refreshSnapshot(forceRender = false) {
     const managedCount = managedInterfaces().length;
     const otherCount = appState.snapshot.interfaces.length - managedCount;
     $("#side-count").textContent = !nextSnapshot.discovery?.interfaces ? "Collecte initiale des interfaces…" : `${appState.snapshot.apps.length} applications • ${managedCount} gérées${otherCount ? ` • ${otherCount} autres` : ""}`;
-    $("#side-version").textContent = `v${nextSnapshot.version || "0.4.0"}`;
+    $("#side-version").textContent = `v${nextSnapshot.version || "0.4.1"}`;
     const issues = Object.values(nextSnapshot.discovery || {}).filter(source => source.state === "error");
     const healthTitle = $(".system-health b");
     healthTitle.textContent = issues.length ? "Collecte partielle" : "Système opérationnel";
@@ -347,6 +347,7 @@ function renderDashboard() {
   }).join("");
   $("#content").innerHTML = `
     ${warnings.length ? `<div class="recommendation warning"><h3>Configuration à compléter</h3><p>${warnings.map(esc).join(" ")}</p></div>` : ""}
+    ${appState.snapshot.network_status?.mode === "local" ? networkNotice() : ""}
     <div class="cards">${cards || `<div class="recommendation warning"><h3>${appState.snapshot.discovery?.interfaces ? "Aucune interface détectée" : "Première collecte en cours"}</h3><p>${appState.snapshot.discovery?.interfaces ? "Vérifiez le mode réseau hôte et le diagnostic de collecte. Les autres sources continuent de fonctionner." : "Les interfaces s’afficheront dès leur découverte, indépendamment des statistiques Docker."}</p></div>`}</div>
     ${vpnCards()}
     <section class="panel"><div class="panel-head"><div><h2>Historique des interfaces</h2><p>Moyennes conservées toutes les ${appState.snapshot.settings.history_interval_seconds || 60} s • ${appState.snapshot.settings.display_rate_unit === "MBps" ? "Mo/s" : "Mb/s"}</p></div>${chartLegend(interfaces)}</div><div class="chart-wrap"><canvas id="traffic-chart"></canvas></div></section>
@@ -502,33 +503,26 @@ function renderTraffic() {
   });
 }
 
-function renderNetwork() {
+function networkNotice() {
+  const status = appState.snapshot.network_status;
+  return status ? `<div class="recommendation${status.warning ? " warning" : ""}"><h3>${esc(status.title)}</h3><p>${esc(status.message)}</p></div>` : "";
+}
+
+function renderNetwork(selectedInterface) {
   const interfaces = appState.snapshot.interfaces;
   const managed = managedInterfaces();
   const detectedOnly = interfaces.filter(item => item.managed === false);
   const physical = managed.filter(item => ["eth0", "eth1"].includes(item.name.toLowerCase()));
-  const configured = physical.find(item => item.name.toLowerCase() === "eth1") || {};
-  const addressedNetworks = physical.filter(item => item.network && item.address).map(item => item.network);
-  const configuredNetworks = physical.filter(item => item.up && item.network && item.address && item.gateway).map(item => item.network);
-  const hasNetworkConflict = addressedNetworks.length >= 2 && new Set(addressedNetworks).size < addressedNetworks.length;
-  const proposedAddress = hasNetworkConflict ? "192.168.2.131" : (configured.address || "192.168.2.131");
-  const proposedGateway = hasNetworkConflict ? "192.168.2.1" : (configured.gateway || "192.168.2.1");
+  const editable = selectedInterface || physical.find(item => !item.default)?.name || "eth1";
+  const configured = physical.find(item => item.name === editable) || {};
+  const proposedAddress = configured.address || "";
+  const proposedGateway = configured.gateway || "";
   const cards = managed.map((item, index) => `<article class="network-card" style="--accent:${interfaceColor(index)}"><div class="network-card-head"><span class="nic-icon">↔</span><h3>${esc(item.name.toUpperCase())}</h3><span class="badge blue">Gérée</span><span class="badge ${item.up ? "green" : "red"}">${item.up ? "Connectée" : "Hors ligne"}</span></div><div class="network-details"><div class="detail"><small>Adresse IP</small><b>${esc(item.address || "Non configurée")}${item.prefix ? `/${item.prefix}` : ""}</b></div><div class="detail"><small>Passerelle</small><b>${esc(item.gateway || "—")}</b></div><div class="detail"><small>Sous-réseau</small><b>${esc(item.network || "—")}</b></div><div class="detail"><small>Vitesse</small><b>${item.speed_mbps || "—"} Mb/s</b></div><div class="detail"><small>MTU</small><b>${item.mtu || 1500}</b></div></div></article>`).join("");
-  const distinct = configuredNetworks.length >= 2 && !hasNetworkConflict;
-  const eth0 = physical.find(item => item.name.toLowerCase() === "eth0");
-  const eth1 = physical.find(item => item.name.toLowerCase() === "eth1");
-  let networkNotice;
-  if (distinct) {
-    networkNotice = `<div class="recommendation"><h3>Configuration correcte : sous-réseaux distincts</h3><p>ETH0 utilise <b>${esc(eth0.network)}</b> et ETH1 utilise <b>${esc(eth1.network)}</b>. Les deux routes peuvent être sélectionnées séparément ; aucune modification n’est demandée.</p></div>`;
-  } else if (hasNetworkConflict) {
-    networkNotice = `<div class="recommendation warning"><h3>Conflit détecté : même sous-réseau</h3><p>ETH0 et ETH1 utilisent tous les deux <b>${esc(addressedNetworks[0])}</b>. Placez ETH1 sur un autre réseau, par exemple <b>192.168.2.131/24</b> avec la passerelle <b>192.168.2.1</b>.</p></div>`;
-  } else {
-    networkNotice = `<div class="recommendation warning"><h3>Deuxième sortie incomplète</h3><p>${eth1 ? "ETH1 n’a pas encore une adresse et une passerelle utilisables." : "ETH1 n’a pas été détectée."} La configuration proposée est <b>192.168.2.131/24</b> avec une passerelle <b>192.168.2.1</b>.</p></div>`;
-  }
-  $("#content").innerHTML = `<div class="split"><div><div class="toolbar"><div><h2>Interfaces gérées</h2><p>Seules ETH0, ETH1 et Tailscale peuvent être utilisées par DualRoute.</p></div><button class="secondary" id="rediscover">↻ Actualiser</button></div><div class="network-stack">${cards || `<div class="recommendation warning"><h3>Aucune interface gérée</h3><p>Vérifiez network_mode: host dans Compose.</p></div>`}</div>${networkNotice}</div>
-    <section class="panel" style="margin-top:0"><div class="panel-head"><div><h2>Configuration ETH1</h2><p>Tester avant d’appliquer</p></div></div><form id="network-form" class="config-form"><label>Interface<select name="interface"><option value="eth1">ETH1</option></select></label><div class="form-grid"><label>Adresse IP<input name="address" value="${esc(proposedAddress)}" required></label><label>Préfixe<input name="prefix" type="number" value="${configured.prefix || 24}" min="1" max="32"></label></div><label>Passerelle<input name="gateway" value="${esc(proposedGateway)}" required></label><div class="form-grid"><label>DNS<input name="dns" value="${esc(proposedGateway)}, 1.1.1.1"></label><label>MTU<input name="mtu" type="number" value="${configured.mtu || 1500}"></label></div><div class="form-actions"><button type="button" class="secondary" id="test-network">▷ Tester</button><button type="submit" class="primary">Appliquer</button></div><pre id="network-result" class="code-preview">Aucun test lancé.</pre></form></section></div>
+  $("#content").innerHTML = `<div class="split"><div><div class="toolbar"><div><h2>Interfaces gérées</h2><p>Seules ETH0, ETH1 et Tailscale peuvent être utilisées par DualRoute.</p></div><button class="secondary" id="rediscover">↻ Actualiser</button></div><div class="network-stack">${cards || `<div class="recommendation warning"><h3>Aucune interface gérée</h3><p>Vérifiez network_mode: host dans Compose.</p></div>`}</div>${networkNotice()}</div>
+    <section class="panel" style="margin-top:0"><div class="panel-head"><div><h2>Configuration ${esc(editable.toUpperCase())}</h2><p>La carte portant la route principale est protégée</p></div></div><form id="network-form" class="config-form"><label>Interface<select name="interface">${["eth0", "eth1"].map(name => `<option value="${name}" ${name === editable ? "selected" : ""}>${name.toUpperCase()}${physical.find(item => item.name === name)?.default ? " · route principale protégée" : ""}</option>`).join("")}</select></label><div class="form-grid"><label>Adresse IP<input name="address" value="${esc(proposedAddress)}" required></label><label>Préfixe<input name="prefix" type="number" value="${configured.prefix || 24}" min="1" max="32"></label></div><label>Passerelle facultative<input name="gateway" value="${esc(proposedGateway)}" placeholder="Vide = réseau local uniquement"></label><p class="field-note">Renseignez uniquement une passerelle réelle pour le routage Internet. Elle est enregistrée pour les tables dédiées de DualRoute ; aucune deuxième route par défaut n’est ajoutée à la table principale du NAS.</p><div class="form-grid"><label>DNS (enregistrés, non appliqués au NAS)<input name="dns" value="${esc((configured.configured?.dns || []).join(", "))}"></label><label>MTU<input name="mtu" type="number" value="${configured.mtu || 1500}"></label></div><div class="form-actions"><button type="button" class="secondary" id="test-network">▷ Tester</button><button type="submit" class="primary">Appliquer</button></div><pre id="network-result" class="code-preview">Aucun test lancé.</pre></form></section></div>
     <section class="panel"><div class="panel-head"><div><h2>Toutes les interfaces détectées</h2><p>${managed.length} gérées • ${detectedOnly.length} observées seulement. Les interfaces Docker, bridges et virtuelles ne sont jamais modifiées.</p></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Interface</th><th>Périmètre</th><th>Type</th><th>État</th><th>Adresse</th><th>Passerelle</th><th>Sous-réseau</th><th>Lien</th></tr></thead><tbody>${interfaces.map(item => `<tr><td><b>${esc(item.name)}</b></td><td><span class="badge ${item.managed ? "blue" : "amber"}">${item.managed ? "Gérée" : "Observation seule"}</span></td><td>${esc(item.kind || "—")}</td><td><span class="badge ${item.up ? "green" : "red"}">${item.up ? "Active" : "Inactive"}</span></td><td>${esc(item.address || "—")}</td><td>${esc(item.gateway || "—")}</td><td>${esc(item.network || "—")}</td><td data-sort="${item.speed_mbps || 0}">${item.speed_mbps || 0} Mb/s</td></tr>`).join("") || tableEmpty(8, "Aucune donnée")}</tbody></table></div></section>`;
   $("#rediscover").onclick = () => refreshSnapshot(true);
+  $("#network-form").elements.interface.onchange = event => { renderNetwork(event.target.value); enhanceTables(); };
   $("#test-network").onclick = () => testNetwork(false);
   $("#network-form").onsubmit = event => { event.preventDefault(); testNetwork(true); };
   $("#content").insertAdjacentHTML("beforeend", vpnCards());

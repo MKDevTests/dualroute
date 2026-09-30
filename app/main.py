@@ -24,6 +24,7 @@ from .network import (
     build_apply_plan,
     build_interface_plan,
     execute_plan,
+    network_status,
     resolve_rules_for_health,
     route_capable_interfaces,
     test_gateway,
@@ -114,8 +115,16 @@ async def lifespan(_: FastAPI):
             pass
 
 
-app = FastAPI(title="DualRoute", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="DualRoute", version="0.4.1", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
+
+
+@app.middleware("http")
+async def prevent_stale_ui(request, call_next):
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def current_state(include_stats: bool = False) -> dict[str, Any]:
@@ -146,6 +155,7 @@ def current_state(include_stats: bool = False) -> dict[str, Any]:
         "settings": store.settings(),
         "network_configs": network_configs,
         "warnings": validate_distinct_networks(interfaces),
+        "network_status": network_status(interfaces),
     }
 
 
@@ -237,7 +247,11 @@ def events(limit: int = Query(default=100, ge=1, le=1000)) -> list[dict[str, Any
 
 @app.post("/api/network/test")
 def network_test(payload: NetworkConfigInput) -> dict[str, Any]:
-    return test_gateway(payload.interface, payload.gateway)
+    try:
+        build_interface_plan(payload.model_dump())
+        return test_gateway(payload.interface, payload.gateway)
+    except (NetworkError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/network/configure")
@@ -264,7 +278,7 @@ def network_configure(request: NetworkConfigureRequest) -> dict[str, Any]:
         level = "warning" if validation["ok"] else "error"
         store.event(level, "network", f"Configuration appliquée à {payload.interface}", {**data, "validation": validation})
         return {"applied": True, "plan": preview, "results": results, "validation": validation}
-    except NetworkError as exc:
+    except (NetworkError, ValueError) as exc:
         store.event("error", "network", str(exc), data)
         raise HTTPException(400, str(exc)) from exc
 

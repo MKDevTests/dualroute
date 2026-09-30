@@ -5,10 +5,13 @@ from app.network import (
     build_apply_plan,
     build_interface_plan,
     build_nft_script,
+    network_status,
     resolve_rules_for_health,
     validate_distinct_networks,
+    test_gateway,
 )
 from app.discovery import is_managed_interface
+from app.models import NetworkConfigInput
 
 
 INTERFACES = [
@@ -42,6 +45,45 @@ RULES = [
 
 
 class NetworkPlanTests(unittest.TestCase):
+    def test_nas_inverted_names_and_lan_without_gateway_are_valid(self):
+        interfaces = [dict(INTERFACES[0], address="192.168.2.131", network="192.168.2.0/24", gateway=None),
+                      dict(INTERFACES[1], address="192.168.1.131", network="192.168.1.0/24", gateway="192.168.1.254")]
+        status = network_status(interfaces)
+        self.assertEqual(status["mode"], "local")
+        self.assertIn("ETH0", status["title"])
+        self.assertNotIn("ETH1", status["title"])
+        self.assertEqual(validate_distinct_networks(interfaces), [])
+        with self.assertRaisesRegex(NetworkError, "ETH0"):
+            build_apply_plan(RULES, APPS, interfaces)
+
+    def test_both_cards_can_be_local_without_gateway(self):
+        interfaces = [dict(item, gateway=None) for item in INTERFACES]
+        self.assertEqual(validate_distinct_networks(interfaces), [])
+        self.assertEqual(network_status(interfaces)["mode"], "local")
+
+    def test_subnet_overlap_is_detected_even_without_gateway(self):
+        interfaces = [dict(INTERFACES[0], gateway=None), dict(INTERFACES[1], network="192.168.1.0/24", gateway=None)]
+        self.assertEqual(network_status(interfaces)["mode"], "overlap")
+        self.assertTrue(validate_distinct_networks(interfaces))
+
+    def test_missing_card_is_identified_without_inventing_gateway(self):
+        status = network_status([INTERFACES[1]])
+        self.assertIn("ETH0", status["message"])
+        self.assertNotIn("192.168.2.1", status["message"])
+
+    def test_local_configuration_accepts_empty_gateway_and_adds_no_default(self):
+        config = NetworkConfigInput(interface="eth0", address="192.168.2.131").model_dump()
+        self.assertEqual(config["gateway"], "")
+        plan = "\n".join(command.display() for command in build_interface_plan(config))
+        self.assertIn("ip address add 192.168.2.131/24 dev eth0", plan)
+        self.assertNotIn("route replace default", plan)
+        self.assertNotIn("dev eth1", plan)
+        self.assertIn("réseau", test_gateway("eth0", "")["message"])
+
+    def test_only_physical_cards_can_be_configured(self):
+        with self.assertRaises(NetworkError):
+            build_interface_plan({"interface":"tailscale0", "address":"192.168.2.131", "prefix":24, "gateway":""})
+
     def test_distinct_networks_have_no_warning(self):
         self.assertEqual(validate_distinct_networks(INTERFACES), [])
 

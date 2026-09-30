@@ -40,7 +40,7 @@ class NetworkConfigInput(BaseModel):
     interface: str = Field(pattern=r"^[a-zA-Z0-9_.:-]+$")
     address: str
     prefix: int = Field(default=24, ge=1, le=32)
-    gateway: str
+    gateway: str = ""
     dns: list[str] = Field(default_factory=list, max_length=4)
     mtu: int = Field(default=1500, ge=576, le=9216)
 

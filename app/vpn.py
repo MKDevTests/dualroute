@@ -43,7 +43,7 @@ class VPNMonitor:
                     result[field] = str(ipaddress.ip_address(value)) if field == "public_ip" else value
             result["api_message"] = "API de surveillance accessible"
         except HTTPError as exc:
-            result["api_message"] = "Clé API requise ou droits GET insuffisants" if exc.code in {401, 403} else f"API : HTTP {exc.code}"
+            result["api_message"] = "Surveillance locale disponible ; IP publique inaccessible : clé API requise ou droits GET insuffisants (Paramètres)" if exc.code in {401, 403} else f"API : HTTP {exc.code}"
         except (OSError, URLError, ValueError, TypeError):
             pass
         return result

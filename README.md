@@ -32,6 +32,10 @@ Utiliser deux sous-réseaux distincts évite les ambiguïtés ARP et permet au r
 
 Le second routeur doit réellement être configuré avec l'adresse LAN `192.168.2.1`. Attribuer seulement une adresse `192.168.2.x` au NAS ne suffit pas. Pour le trafic entrant, configurez également les redirections de ports sur le routeur correspondant.
 
+Ce tableau est un exemple, pas une configuration obligatoire. Les noms ETH0/ETH1 et la carte portant la route principale sont découverts sur le NAS ; ils peuvent être inversés. Une carte avec une adresse mais sans passerelle est une configuration **réseau local uniquement** valide, notamment pour SMB sur son sous-réseau. DualRoute l’observe sans demander d’inventer une passerelle ni de modifier son adresse. Le double routage Internet reste indisponible sans une passerelle réelle sur chacune des deux cartes.
+
+Dans Réseau, la carte sans route par défaut est sélectionnée en premier ; les deux cartes peuvent être sélectionnées et la carte principale reste protégée côté API. Le champ passerelle est facultatif. Lors d’une configuration explicitement appliquée à la carte secondaire, DualRoute retire uniquement son éventuelle route par défaut de la table principale. La passerelle renseignée est enregistrée pour les tables dédiées 101/102, installées à l’application des règles. La route par défaut de l’autre carte est conservée. Les DNS sont seulement enregistrés, sans modification du résolveur ZimaOS.
+
 ## Installation sur ZimaOS
 
 Créer un dossier contenant le fichier [`compose.yml`](compose.yml), puis lancer depuis ce dossier :
@@ -60,6 +64,8 @@ La découverte des interfaces, des applications, des VPN, des statistiques Docke
 Le profil AppArmor Docker est conservé. Sur les systèmes où il interdit la lecture des descripteurs de certains processus du NAS, leurs flux peuvent rester non résolus ; l’interface indique le nombre de lectures refusées. Les conteneurs utilisant ce même profil, y compris en mode réseau hôte, restent attribuables. Les services reconnus par ports (par exemple SMB) utilisent aussi cette identification de repli. Une attribution exhaustive des services système nécessite une politique de lecture adaptée par l’administrateur ; DualRoute ne désactive pas AppArmor.
 
 Les conteneurs utilisant une image nommée `gluetun` sont détectés automatiquement, y compris s’ils sont arrêtés. Sans Gluetun détecté, les sections VPN sont masquées. Un conteneur détecté mais non observable reste affiché « Indéterminé ».
+
+Si les cartes VPN n’apparaissent pas après une mise à jour alors que `/api/snapshot` contient les VPN, rechargez l’onglet avec **Ctrl+F5**. Depuis la 0.4.1, les fichiers JavaScript/CSS sont versionnés et les réponses de l’interface ne sont plus mises en cache. Un refus de l’API Gluetun ne masque pas le VPN : son état Docker et les mesures locales restent affichés, seule la lecture du statut interne et de l’IP publique nécessite les droits API.
 
 - **Tableau de bord** : bloc violet séparé, état Docker, santé, état du tunnel, débits reçus/envoyés, IP publique et applications liées.
 - **Trafic** : onglets « Interfaces du NAS » et « VPN des conteneurs », choix du VPN, connexions dans son espace réseau, processus/applications, historique du tunnel. Les connexions LAN et de supervision présentes dans cet espace réseau sont incluses ; les débits des cartes `tun*`/`wg*` mesurent le tunnel lui-même.

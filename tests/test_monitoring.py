@@ -151,6 +151,27 @@ class MonitoringTests(unittest.TestCase):
         self.assertEqual(snapshot["interfaces"][0]["name"], "eth0")
         self.assertNotIn("private", str(snapshot))
 
+    def test_primary_protection_follows_actual_route_not_interface_name(self):
+        from fastapi import HTTPException
+        from app import main
+        from app.models import NetworkConfigureRequest
+        request = NetworkConfigureRequest(config={"interface":"eth1", "address":"192.168.1.131", "gateway":"192.168.1.254"})
+        with patch("app.main.discover_interfaces", return_value=[{"name":"eth1", "default":True}]), patch("app.main.os.getenv", return_value=None), patch("app.main.execute_plan") as execute:
+            with self.assertRaises(HTTPException) as rejected:
+                main.network_configure(request)
+            self.assertEqual(rejected.exception.status_code, 409)
+            execute.assert_not_called()
+
+    def test_secondary_without_gateway_can_be_previewed_without_execution(self):
+        from app import main
+        from app.models import NetworkConfigureRequest
+        request = NetworkConfigureRequest(config={"interface":"eth0", "address":"192.168.2.131"})
+        with patch("app.main.discover_interfaces", return_value=[{"name":"eth1", "default":True}]), patch("app.main.execute_plan") as execute:
+            result = main.network_configure(request)
+            self.assertFalse(result["applied"])
+            self.assertFalse(any("dev eth1" in command for command in result["plan"]))
+            execute.assert_not_called()
+
     def test_independent_inventory_continues_while_statistics_are_blocked(self):
         async def run():
             monitor = Monitor(self.store, MetricsCollector(self.store))
