@@ -57,6 +57,8 @@ La découverte des interfaces, des applications, des VPN, des statistiques Docke
 
 ## Surveillance Gluetun
 
+Le profil AppArmor Docker est conservé. Sur les systèmes où il interdit la lecture des descripteurs de certains processus du NAS, leurs flux peuvent rester non résolus ; l’interface indique le nombre de lectures refusées. Les conteneurs utilisant ce même profil, y compris en mode réseau hôte, restent attribuables. Les services reconnus par ports (par exemple SMB) utilisent aussi cette identification de repli. Une attribution exhaustive des services système nécessite une politique de lecture adaptée par l’administrateur ; DualRoute ne désactive pas AppArmor.
+
 Les conteneurs utilisant une image nommée `gluetun` sont détectés automatiquement, y compris s’ils sont arrêtés. Sans Gluetun détecté, les sections VPN sont masquées. Un conteneur détecté mais non observable reste affiché « Indéterminé ».
 
 - **Tableau de bord** : bloc violet séparé, état Docker, santé, état du tunnel, débits reçus/envoyés, IP publique et applications liées.

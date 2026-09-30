@@ -55,13 +55,23 @@ def accept():
 
 
 threading.Thread(target=accept, daemon=True).start()
-names = ["dualroute-smoke", "dualroute-smoke-client", "dualroute-smoke-vpn"]
+names = ["dualroute-smoke", "dualroute-smoke-client", "dualroute-smoke-vpn", "dualroute-smoke-host-client"]
 try:
     docker("tag", "dualroute:test", "dualroute-smoke/gluetun:local")
     mock_server = '''import http.server,json,subprocess
 subprocess.run(["ip","link","add","wg0","type","dummy"],check=True)
 subprocess.run(["ip","link","set","wg0","up"],check=True)
-subprocess.run(["nft","-f","-"],input="table inet smoke { chain output { type filter hook output priority 0; policy accept; ct state new,established counter; } chain input { type filter hook input priority 0; policy accept; ct state new,established counter; } }",text=True,check=True)
+subprocess.run(["nft","-f","-"],input="""table inet smoke {
+ chain output {
+  type filter hook output priority 0; policy accept;
+  ct state new,established counter;
+ }
+ chain input {
+  type filter hook input priority 0; policy accept;
+  ct state new,established counter;
+ }
+}
+""",text=True,check=True)
 class Handler(http.server.BaseHTTPRequestHandler):
  def do_GET(self):
   self.send_response(200);self.end_headers()
@@ -84,6 +94,8 @@ while True:
  s.sendall(b"traffic"*200);s.recv(65536);time.sleep(.5)
 '''
     docker("run", "-d", "--name", names[1], "--network", "container:" + names[2], "--entrypoint", "python", "dualroute:test", "-u", "-c", client)
+    host_code = client.replace(repr(gateway), repr("127.0.0.1"))
+    docker("run", "-d", "--name", names[3], "--network", "host", "--entrypoint", "python", "dualroute:test", "-u", "-c", host_code)
     host_client = socket.create_connection(("127.0.0.1", port))
     host_client.sendall(b"host-local-test")
     host_client.recv(65536)
@@ -97,8 +109,12 @@ while True:
     observed = next(item for item in snapshot["vpns"] if item["id"] == vpn["id"])
     assert any(app["name"] == names[1] for app in observed["apps"]), observed
     assert observed["metric"]["rx_bps"] is not None, observed
-    assert any(item.get("local_only") and item.get("pid") == os.getpid() and (item["local_endpoint"].endswith(":"+str(port)) or item["remote_endpoint"].endswith(":"+str(port))) for item in api("/api/traffic/flows?limit=2000")["items"]), "Host socket/process attribution failed"
-    print("Linux smoke passed: fast HTTP, Gluetun health, tunnel rates, shared-namespace application and host process attribution")
+    host_flow = eventually(lambda: next((item for item in api("/api/traffic/flows?limit=2000")["items"] if item.get("scope") == "host" and item.get("local_only") and item.get("application") == names[3] and item.get("process") == "python"), None))
+    assert host_flow["pid"], host_flow
+    # AppArmor may refuse OS process descriptors, while same-profile Docker descriptors are readable.
+    result = api("/api/traffic/flows?limit=2000")
+    assert result["process_permission_errors"] > 0 or any(item.get("pid") == os.getpid() for item in result["items"])
+    print("Linux smoke passed: fast HTTP, Gluetun health, tunnel rates, shared-namespace application and host-network container attribution; refused OS reads reported")
 except Exception:
     try:
         print("Flow diagnosis:", {key:value for key,value in api("/api/traffic/flows").items() if key != "items"})
